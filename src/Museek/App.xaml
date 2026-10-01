@@ -1,0 +1,51 @@
+<Application x:Class="Museek.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             ShutdownMode="OnMainWindowClose">
+  <Application.Resources>
+    <SolidColorBrush x:Key="Accent" Color="#C5F277" />
+    <SolidColorBrush x:Key="Muted" Color="#93998F" />
+    <Style TargetType="Button">
+      <Setter Property="Foreground" Value="#EDEFE8" />
+      <Setter Property="Background" Value="#30352D" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Padding" Value="18,10" />
+      <Setter Property="Cursor" Value="Hand" />
+      <Setter Property="FontSize" Value="13" />
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="Surface" Background="{TemplateBinding Background}" CornerRadius="8" Padding="{TemplateBinding Padding}">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Surface" Property="Opacity" Value="0.8" /></Trigger>
+              <Trigger Property="IsPressed" Value="True"><Setter TargetName="Surface" Property="Opacity" Value="0.65" /></Trigger>
+              <Trigger Property="IsEnabled" Value="False"><Setter TargetName="Surface" Property="Opacity" Value="0.35" /></Trigger>
+              <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Surface" Property="BorderBrush" Value="{StaticResource Accent}" /><Setter TargetName="Surface" Property="BorderThickness" Value="2" /></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style TargetType="Slider">
+      <Setter Property="Foreground" Value="{StaticResource Accent}" />
+      <Setter Property="Background" Value="#3D4338" />
+      <Setter Property="IsMoveToPointEnabled" Value="True" />
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Slider">
+            <Grid Margin="6,0" MinHeight="24">
+              <Border Background="{TemplateBinding Background}" Height="4" CornerRadius="2" VerticalAlignment="Center" />
+              <Track x:Name="PART_Track">
+                <Track.DecreaseRepeatButton><RepeatButton Command="Slider.DecreaseLarge" Background="{TemplateBinding Foreground}" Focusable="False"><RepeatButton.Template><ControlTemplate TargetType="RepeatButton"><Border Background="{TemplateBinding Background}" Height="4" CornerRadius="2" /></ControlTemplate></RepeatButton.Template></RepeatButton></Track.DecreaseRepeatButton>
+                <Track.Thumb><Thumb Width="12" Height="12" Background="{TemplateBinding Foreground}"><Thumb.Template><ControlTemplate TargetType="Thumb"><Ellipse Fill="{TemplateBinding Background}" /></ControlTemplate></Thumb.Template></Thumb></Track.Thumb>
+                <Track.IncreaseRepeatButton><RepeatButton Command="Slider.IncreaseLarge" Focusable="False" Opacity="0"><RepeatButton.Template><ControlTemplate TargetType="RepeatButton"><Border Background="Transparent" Height="24" /></ControlTemplate></RepeatButton.Template></RepeatButton></Track.IncreaseRepeatButton>
+              </Track>
+            </Grid>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+  </Application.Resources>
+</Application>

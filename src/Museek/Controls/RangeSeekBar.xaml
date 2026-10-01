@@ -1,0 +1,41 @@
+<UserControl x:Class="Museek.Controls.RangeSeekBar"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Height="54" Focusable="False">
+  <UserControl.Resources>
+    <Style x:Key="Handle" TargetType="Thumb">
+      <Setter Property="Width" Value="14" />
+      <Setter Property="Height" Value="34" />
+      <Setter Property="Cursor" Value="SizeWE" />
+      <Setter Property="Background" Value="#C5F277" />
+      <Setter Property="Focusable" Value="True" />
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Thumb">
+            <Border x:Name="HandleBorder" Background="{TemplateBinding Background}" CornerRadius="5" BorderBrush="#20251C" BorderThickness="2">
+              <Border Width="2" Height="11" CornerRadius="1" Background="#44522F" />
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="HandleBorder" Property="BorderBrush" Value="White" /></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+  </UserControl.Resources>
+  <Canvas x:Name="Surface" Background="Transparent" SizeChanged="Surface_SizeChanged" MouseLeftButtonDown="Surface_MouseLeftButtonDown">
+    <Border x:Name="TrackBackground" Canvas.Left="12" Canvas.Top="25" Height="4" CornerRadius="2" Background="#3C4236" IsHitTestVisible="False" />
+    <Border x:Name="TrackFill" Canvas.Left="12" Canvas.Top="25" Height="4" CornerRadius="2" Background="#C5F277" IsHitTestVisible="False" />
+    <Thumb x:Name="Playhead" Width="14" Height="24" Canvas.Top="15" Cursor="Hand" Focusable="True"
+           AutomationProperties.Name="Playback position" ToolTip="Seek • Left / Right to move"
+           DragDelta="Playhead_DragDelta" PreviewKeyDown="Playhead_PreviewKeyDown">
+      <Thumb.Template><ControlTemplate TargetType="Thumb"><Grid><Ellipse Fill="#EDEFE8" Width="10" Height="10" /><Ellipse x:Name="FocusRing" Stroke="#C5F277" StrokeThickness="2" Width="14" Height="14" Visibility="Collapsed" /></Grid><ControlTemplate.Triggers><Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="FocusRing" Property="Visibility" Value="Visible" /></Trigger></ControlTemplate.Triggers></ControlTemplate></Thumb.Template>
+    </Thumb>
+    <Thumb x:Name="StartHandle" Style="{StaticResource Handle}" Canvas.Top="10" Visibility="Collapsed"
+           AutomationProperties.Name="Trim start" ToolTip="Trim start • Left / Right to adjust"
+           DragDelta="StartHandle_DragDelta" PreviewKeyDown="StartHandle_PreviewKeyDown" />
+    <Thumb x:Name="EndHandle" Style="{StaticResource Handle}" Canvas.Top="10" Visibility="Collapsed"
+           AutomationProperties.Name="Trim end" ToolTip="Trim end • Left / Right to adjust"
+           DragDelta="EndHandle_DragDelta" PreviewKeyDown="EndHandle_PreviewKeyDown" />
+  </Canvas>
+</UserControl>
