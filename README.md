@@ -1,62 +1,133 @@
 # Museek
 
-A small native Windows 11 audio player with precise trimming and tag editing. Built for **Windows 11 x64**.
+A simple audio player, trimmer and tag editor for **Windows 11 x64**.
 
-## Run
+## Features
 
-Run `dist\setup.exe` to install Museek, then open Museek from Start. The .NET runtime, VLC and FFmpeg are included. A portable copy also remains available at `dist\Museek\Museek.exe`; keep that whole folder together.
+- Play many audio formats, including MP3, FLAC, WAV, M4A, OGG and WMA.
+- Open audio from File Explorer, drag files into Museek, or press **Ctrl+O**.
+- Display the song title, artist, album and embedded album artwork.
+- Play/pause, adjust volume and seek through a song. **Stop** returns to the song start or the selected trim start.
+- Trim a selected range and save a separate WAV, MP3, FLAC, M4A, OGG or Opus copy.
+- Choose Museek as your default audio app through **Tools → Choose Museek as default…**.
+- Enable **Tools → Single-window mode** to reuse the current player when opening another file.
+- Enable **Tools → 'Edit Tags' context menu** to edit one or more files from Explorer's **Show more options** menu. Update title, artist, album, genre and other tags, and add, change or remove album artwork without re-encoding the audio.
 
-- Press **Ctrl+O**, drag an audio file into the window, or open a file from Explorer with Museek.
-- Embedded album artwork appears above the song title; files without artwork show a simple placeholder.
-- The artist and album names appear below the title when those tags are available.
-- Play/pause, adjust the volume, and click or drag the seek bar.
-- **Stop** stops playback and returns to the song start, or to the selected start in trim mode.
-- Enable **Tools → Single-window mode** to reuse the current window when opening audio from Explorer. The tick and setting are remembered; turn it off to allow separate windows. A new file waits for any active save to finish.
-- Enable **Tools → 'Edit Tags' context menu** to add **Edit Tags** to Explorer's **Show more options** menu. Select one or more audio files, right-click, then choose **Show more options → Edit Tags**.
-- The tag editor changes title, artist, album, album artist, genre, year, track/disc number and comment. Only checked fields are applied; check an empty field to clear it. Batch editing preserves each file's other tags. Separate multiple artists or genres with semicolons.
-- Add or change artwork with a JPEG/PNG image, remove artwork, or keep each file's existing artwork. Click **Save tags** to update the selected originals without re-encoding audio. **Cancel** discards unsaved edits. **Stop saving** stops the remaining batch; files already saved keep their changes. Files that cannot be edited are reported individually.
-- Click **Trim**, then drag the green start/end handles. Play previews the selected range.
-- **Save copy** opens Save As. Choose WAV, MP3, FLAC, M4A, OGG or Opus. **Cancel** leaves trim mode.
-- Saving creates a separate audio file. The original cannot be overwritten. Lossy outputs are re-encoded; WAV and FLAC avoid an additional lossy encode.
+Protected/DRM audio and files without a supported decoder cannot be played.
 
-Common formats and many less common ones are supported through VLC/FFmpeg. Protected/DRM audio, corrupt files and formats without an available decoder cannot be played.
+## Installation
 
-## Install and choose defaults
+You do not need VS Code or the .NET SDK to use Museek. The installer includes the required runtimes and audio tools. Current builds are unsigned.
 
-Double-click **`dist\setup.exe`**. The setup wizard installs for your Windows account at `%LOCALAPPDATA%\Programs\Museek`, adds a Start menu shortcut and registers Museek in **Open with** and Windows **Installed apps**. Administrator rights are not required.
+**Install**
 
-Run a newer **`setup.exe`** to update the existing installation in place. The same Start menu entry and install folder are reused. Existing installations made by the previous PowerShell installer are upgraded too. Your settings and audio files are preserved. Close Museek and its tag editor windows before installing an update.
+1. Open the [Museek Releases page](https://github.com/SaoodCS/Museek/releases).
+2. Open the latest release and expand **Assets**.
+3. Download `Museek-X.Y.Z-setup.exe`, where `X.Y.Z` is the version number.
+4. Double-click the downloaded file and follow the setup wizard.
+5. Open **Museek** from the Windows Start menu.
 
-In Museek, open **Tools → Choose Museek as default…** and choose your audio file types in Windows Settings. You can also right-click an audio file in Explorer, select **Open with → Choose another app → Museek**, then choose **Always**. Windows requires you to choose defaults yourself.
+Setup installs for your Windows account at `%LOCALAPPDATA%\Programs\Museek` without administrator rights. To open audio with Museek, right-click a file and choose **Open with → Museek**. To make it the default, use **Tools → Choose Museek as default…** and select your audio file types in Windows Settings.
 
-To uninstall, run **`%LOCALAPPDATA%\Programs\Museek\uninstall.exe`**, or choose **Museek → Uninstall** in Windows **Settings → Apps → Installed apps**. This removes installed program files, the Start menu shortcut and Museek's owned Windows registrations. Audio files, unrelated files placed in the install folder and settings in `%LOCALAPPDATA%\Museek` are kept.
+**Update**
 
-Setup and uninstall also accept `/S` for silent operation. Windows file defaults remain your choice.
+Close Museek and its tag editor windows, download the newer installer from the same Releases page, and run it. Setup updates the existing installation and keeps your settings and audio files. Museek does not currently update itself automatically.
 
-## Keyboard
+**Uninstall**
 
-| Key | Action |
-| --- | --- |
-| Ctrl+O | Open audio |
-| Space | Play / pause |
-| Escape | Cancel trimming or stop an export |
-| Left / Right on seek handle | Seek 0.25 seconds |
-| Left / Right on trim handle | Adjust endpoint 0.25 seconds |
-| Shift + arrow | Move 5 seconds |
-| Home / End on seek handle | Seek to start / end |
+Open Windows **Settings → Apps → Installed apps**, find **Museek**, and choose **Uninstall**. Alternatively, press **Win+R**, enter `%LOCALAPPDATA%\Programs\Museek\uninstall.exe`, and press Enter. Your audio files and settings are kept.
+
+## Development
+
+Development means editing the source code and running your changes. Use a Windows 11 x64 computer.
+
+1. Install [Visual Studio Code](https://code.visualstudio.com/), the [.NET 10 SDK for Windows x64](https://dotnet.microsoft.com/download/dotnet/10.0), and [Git for Windows](https://git-scm.com/download/win). Choose the **SDK**, not only the runtime.
+2. In VS Code, install Microsoft's [C# extension](https://marketplace.visualstudio.com/items?itemName=ms-dotnettools.csharp). Restart VS Code after installing the SDK and Git.
+3. Open **Terminal → New Terminal** in VS Code and choose **PowerShell**. Download the project:
+
+```powershell
+git clone https://github.com/SaoodCS/Museek.git
+```
+
+4. Use **File → Open Folder** to open the downloaded `Museek` folder. Open a new PowerShell terminal there. It should contain `Museek.sln`, `src` and `scripts`.
+5. Allow the project's local PowerShell scripts in this terminal, then prepare the audio tools once:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
+.\scripts\Build.ps1 -SkipChecks
+```
+
+The execution policy command applies only to this terminal and needs no administrator rights. Repeat it in a new terminal before running the project's scripts. The build command downloads dependencies and creates a local build; the first run can take several minutes. It does not install Museek on your computer.
+
+6. In that terminal, run:
+
+```powershell
+$env:PATH = "$((Resolve-Path .\dist\Museek\tools).Path);$env:PATH"
+dotnet watch --project .\src\Museek\Museek.csproj
+```
+
+The first line lets the development app find FFmpeg and FFprobe. Repeat it when opening a new terminal. The second line builds and starts Museek, then watches your source files for changes.
+
+Supported **C#** edits can hot reload while the app is running. Other edits may require a restart. **XAML layout changes are not automatically hot reloaded in this VS Code flow**; press **Ctrl+R** in the terminal to rebuild and restart after saving them. Press **Ctrl+C** to stop development. See the [dotnet watch documentation](https://learn.microsoft.com/en-us/dotnet/core/tools/dotnet-watch) for supported changes.
+
+To run without watching for changes, use `dotnet run --project .\src\Museek\Museek.csproj` instead, after setting the audio tools path above. The app code is in `src\Museek`; its trim-selection model is in `src\Museek.Core`.
 
 ## Build
 
-Install the [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0), then:
+Building creates the app files and installer you can run or share.
+
+1. Complete the Development prerequisites and open the project folder in VS Code.
+2. Stop the development app with **Ctrl+C** and close any copy running from `dist`.
+3. In VS Code's PowerShell terminal, run:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Build.ps1
+.\scripts\Build.ps1
 ```
 
-The script restores the pinned VLC and TagLibSharp packages, downloads FFmpeg essentials with checksum verification, publishes a self-contained x64 app into `dist\Museek` and builds **`dist\setup.exe`** with NSIS 3.13. The portable compiler downloads into `.tools` with a pinned SHA256; no tool installation is needed. Supply `-MakensisPath C:\path\to\makensis.exe` to use an existing compiler, or `-FfmpegDirectory C:\path\to\bin` for an existing FFmpeg build. A local SDK at `.tools\dotnet` is detected automatically.
+The script restores dependencies, includes the .NET runtime and audio tools, runs the app/installer/release checks, and builds the installer. NSIS, the installer-building tool, is downloaded automatically; you do not need to install it separately.
 
-Build runs the core, audio-export, artwork, single-window, tag-editing, registration and native UI checks, plus real setup/update/uninstall tests using a separate test app and isolated Windows registrations. Tests require FFmpeg/FFprobe on PATH; Build supplies it. Use `-SkipChecks` when only packaging an already verified build. To rebuild setup from an existing published app, run `scripts\Build-Installer.ps1`.
+After a successful build:
 
-Source lives in `src\Museek`. The small selection model is in `src\Museek.Core`. Test screenshots are written into `artifacts`.
+- Run `dist\Museek\Museek.exe` to try the built app directly. Keep the entire `dist\Museek` folder together.
+- Run `dist\setup.exe` to install or update your local copy.
 
-The app is unsigned. There is no Microsoft Store package or code-signing certificate included.
+You can start the built app from the same terminal:
+
+```powershell
+.\dist\Museek\Museek.exe
+```
+
+`-SkipChecks` makes a faster build while developing. Use the full command above when preparing a release.
+
+## Releasing
+
+GitHub releases are triggered by pushing an explicit **`vX.Y.Z` version tag**. Normal pushes to `main` do not publish a release.
+
+For example, to release **1.2.0**:
+
+1. Put the finished changes on `main` and review them.
+2. In `src\Museek\Museek.csproj`, change the version to `<Version>1.2.0</Version>`.
+3. Create `releases\1.2.0.md` with the changes and any upgrade instructions, and add the version to `CHANGELOG.md`. Update other documentation and licenses when needed.
+4. Validate, build and prepare the release files in VS Code's PowerShell terminal:
+
+```powershell
+.\scripts\Get-ReleaseInfo.ps1 -Tag v1.2.0
+.\scripts\Build.ps1
+.\scripts\Prepare-Release.ps1 -Tag v1.2.0
+```
+
+Resolve any errors, then review the files in `dist\release`. The app version, tag and release notes filename must match.
+
+5. Commit the reviewed changes on `main`, push them, then create and push that version tag:
+
+```powershell
+git add .
+git commit -m "Prepare Museek 1.2.0"
+git push origin main
+git tag -a v1.2.0 -m "Museek 1.2.0"
+git push origin v1.2.0
+```
+
+GitHub Actions builds and checks that tagged version, then publishes **Museek 1.2.0** with its installer, release notes, README, changelog, third-party notices, licenses and SHA256 checksums. GitHub also supplies source archives. Check the workflow under **Actions** and confirm the files on the **Releases** page.
+
+No personal access token is needed for the workflow; it uses GitHub's built-in token. Existing published releases are not overwritten. See the [full release guide](https://github.com/SaoodCS/Museek/blob/main/docs/RELEASING.md) for permissions and failure recovery.

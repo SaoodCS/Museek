@@ -1,0 +1,135 @@
+name: Release Museek
+
+# A release is deliberate: normal branch pushes never run this workflow.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: museek-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ github.ref_name }}
+  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+  DOTNET_NOLOGO: '1'
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  build:
+    name: Validate, test, and package
+    if: startsWith(github.ref, 'refs/tags/v') && !github.event.deleted
+    runs-on: windows-2025
+    timeout-minutes: 60
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
+      title: ${{ steps.metadata.outputs.title }}
+      artifact-id: ${{ steps.assets.outputs.artifact-id }}
+    steps:
+      - name: Check out the tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install .NET 10 SDK
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: '10.0.x'
+          dotnet-quality: ga
+
+      - name: Validate the version and release notes
+        id: metadata
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $release = & ./scripts/Get-ReleaseInfo.ps1 -Tag $env:RELEASE_TAG
+          "version=$($release.Version)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "title=$($release.Title)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Build the installer and run all checks
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & ./scripts/Build.ps1 -DotNetPath (Get-Command dotnet -ErrorAction Stop).Source
+
+      - name: Prepare the versioned release assets
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & ./scripts/Prepare-Release.ps1 -Tag $env:RELEASE_TAG
+
+      - name: Upload the tested release package
+        id: assets
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: museek-release-${{ github.ref_name }}
+          path: dist/release/**
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  publish:
+    name: Publish GitHub release
+    needs: build
+    runs-on: windows-2025
+    timeout-minutes: 15
+    # Building tagged code has no write token. Only this job can publish.
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_VERSION: ${{ needs.build.outputs.version }}
+      RELEASE_TITLE: ${{ needs.build.outputs.title }}
+    steps:
+      - name: Download the tested release package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create the release with its installer and documentation
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RELEASE_TAG -cnotmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' -or
+              $env:RELEASE_TAG -cne ('v' + $env:RELEASE_VERSION) -or
+              $env:RELEASE_TITLE -cne ('Museek ' + $env:RELEASE_VERSION)) {
+              throw 'Release metadata does not match the pushed version tag.'
+          }
+          $assetDirectory = Join-Path $env:GITHUB_WORKSPACE 'release-assets'
+          $expectedNames = @("Museek-$($env:RELEASE_VERSION)-setup.exe", 'release-notes.md',
+              'README.md', 'CHANGELOG.md', 'THIRD-PARTY-NOTICES.md', 'licenses.zip', 'SHA256SUMS.txt')
+          $items = @(Get-ChildItem -LiteralPath $assetDirectory -Force)
+          if ($items.Count -ne $expectedNames.Count -or @($items | Where-Object {
+                  $_.PSIsContainer -or ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                  $_.Name -cnotin $expectedNames
+              }).Count -gt 0) {
+              throw 'Release package must contain exactly the seven expected files.'
+          }
+          $checksumPath = Join-Path $assetDirectory 'SHA256SUMS.txt'
+          $checksums = [IO.File]::ReadAllLines($checksumPath)
+          if ($checksums.Count -ne ($expectedNames.Count - 1)) { throw 'Release checksums are incomplete.' }
+          $checkedNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+          foreach ($line in $checksums) {
+              if ($line -cnotmatch '^(?<hash>[0-9a-f]{64})  (?<name>.+)$') { throw 'Invalid release checksum entry.' }
+              $expectedHash = $Matches.hash
+              $fileName = $Matches.name
+              if ($fileName -ceq 'SHA256SUMS.txt' -or $fileName -cnotin $expectedNames -or
+                  -not $checkedNames.Add($fileName)) { throw 'Unexpected or duplicate release checksum entry.' }
+              $actualHash = (Get-FileHash -LiteralPath (Join-Path $assetDirectory $fileName) -Algorithm SHA256).Hash
+              if ($actualHash.ToLowerInvariant() -cne $expectedHash) { throw "Release checksum mismatch: $fileName" }
+          }
+          $notes = Join-Path $assetDirectory 'release-notes.md'
+          if ([string]::IsNullOrWhiteSpace([IO.File]::ReadAllText($notes))) { throw 'Release notes are empty.' }
+          $assets = @($items | Sort-Object Name | Select-Object -ExpandProperty FullName)
+          # create refuses an existing release; a rerun never replaces published assets.
+          $arguments = @('release', 'create', $env:RELEASE_TAG, '--verify-tag',
+              '--title', $env:RELEASE_TITLE, '--notes-file', $notes, '--latest') + $assets
+          & gh @arguments
+          if ($LASTEXITCODE -ne 0) { throw 'GitHub release creation failed; an existing release is never overwritten.' }

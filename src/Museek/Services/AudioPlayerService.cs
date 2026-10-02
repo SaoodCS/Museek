@@ -16,11 +16,14 @@ public sealed class AudioPlayerService : IDisposable
     public double Position => Math.Max(0, _player.Time / 1000.0);
     public int Volume { get => _player.Volume; set => _player.Volume = Math.Clamp(value, 0, 100); }
 
-    public AudioPlayerService()
+    public AudioPlayerService(bool useDummyAudioOutput = false)
     {
         var nativePath = Path.Combine(AppContext.BaseDirectory, "libvlc", "win-x64");
         LibVLCSharp.Shared.Core.Initialize(Directory.Exists(nativePath) ? nativePath : null);
-        _vlc = new LibVLC("--no-video", "--quiet", "--no-osd", "--no-metadata-network-access");
+        var options = new List<string> { "--no-video", "--quiet", "--no-osd", "--no-metadata-network-access" };
+        // CI checks use the real decoder and playback clock without requiring an audio device.
+        if (useDummyAudioOutput) options.Add("--aout=dummy");
+        _vlc = new LibVLC(options.ToArray());
         _player = new MediaPlayer(_vlc);
         _player.EncounteredError += OnError;
         Volume = 75;

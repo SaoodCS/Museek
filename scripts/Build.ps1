@@ -83,6 +83,7 @@ try {
     & (Join-Path $PSScriptRoot 'Build-Installer.ps1') -MakensisPath $MakensisPath
     if (-not $SkipChecks) {
         & (Join-Path $projectRoot 'tests\InstallerChecks.ps1') -NsisPath $MakensisPath -DotNetPath $DotNetPath
+        & (Join-Path $projectRoot 'tests\ReleaseChecks.ps1') -DotNetPath $DotNetPath
     }
     Write-Host "Ready: $output\Museek.exe"
 } finally { Pop-Location }

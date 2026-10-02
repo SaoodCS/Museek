@@ -45,7 +45,7 @@ public partial class MainWindow : Window
     public void ShowStatus(string message) => StatusText.Text = message;
 
     public MainWindow(string? initialPath = null, AppSettingsService? settings = null,
-        Action<bool>? editTagsContextMenuRegistration = null)
+        Action<bool>? editTagsContextMenuRegistration = null, AudioPlayerService? audioPlayer = null)
     {
         _settings = settings ?? new AppSettingsService();
         _editTagsContextMenuRegistration = editTagsContextMenuRegistration ?? (enabled =>
@@ -56,7 +56,7 @@ public partial class MainWindow : Window
         InitializeComponent();
         RefreshSingleWindowMode();
         _initialPath = initialPath;
-        _player = new AudioPlayerService();
+        _player = audioPlayer ?? new AudioPlayerService();
         _player.PlaybackError += Player_PlaybackError;
         _player.Volume = (int)VolumeSlider.Value;
         _timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(80) };

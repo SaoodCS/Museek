@@ -106,7 +106,9 @@ internal static class Program
             var settings = new AppSettingsService(settingsPath);
             var contextMenuRegistration = new List<bool>();
             window = new MainWindow(initialPath: untagged, settings: settings,
-                editTagsContextMenuRegistration: enabled => contextMenuRegistration.Add(enabled));
+                editTagsContextMenuRegistration: enabled => contextMenuRegistration.Add(enabled),
+                audioPlayer: new AudioPlayerService(useDummyAudioOutput:
+                    string.Equals(Environment.GetEnvironmentVariable("CI"), "true", StringComparison.OrdinalIgnoreCase)));
             var volume = Find<Slider>(window, "VolumeSlider");
             volume.Value = 0;
             var player = (AudioPlayerService)(typeof(MainWindow).GetField("_player",
