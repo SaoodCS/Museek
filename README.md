@@ -4,7 +4,7 @@ A small native Windows 11 audio player with precise trimming and tag editing. Bu
 
 ## Run
 
-Open `dist\Museek\Museek.exe`. Keep the whole `Museek` folder together; the .NET runtime, VLC and FFmpeg are included.
+Run `dist\setup.exe` to install Museek, then open Museek from Start. The .NET runtime, VLC and FFmpeg are included. A portable copy also remains available at `dist\Museek\Museek.exe`; keep that whole folder together.
 
 - Press **Ctrl+O**, drag an audio file into the window, or open a file from Explorer with Museek.
 - Embedded album artwork appears above the song title; files without artwork show a simple placeholder.
@@ -23,21 +23,15 @@ Common formats and many less common ones are supported through VLC/FFmpeg. Prote
 
 ## Install and choose defaults
 
-Double-click `dist\Museek\Install.cmd` to install for your account without administrator rights. The optional installer registers Museek in **Open with** and adds a Start menu shortcut. Or run:
+Double-click **`dist\setup.exe`**. The setup wizard installs for your Windows account at `%LOCALAPPDATA%\Programs\Museek`, adds a Start menu shortcut and registers Museek in **Open with** and Windows **Installed apps**. Administrator rights are not required.
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Install.ps1
-```
-
-For a standalone copy of the published folder, run:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\dist\Museek\Install.ps1 -Source .\dist\Museek
-```
+Run a newer **`setup.exe`** to update the existing installation in place. The same Start menu entry and install folder are reused. Existing installations made by the previous PowerShell installer are upgraded too. Your settings and audio files are preserved. Close Museek and its tag editor windows before installing an update.
 
 In Museek, open **Tools → Choose Museek as default…** and choose your audio file types in Windows Settings. You can also right-click an audio file in Explorer, select **Open with → Choose another app → Museek**, then choose **Always**. Windows requires you to choose defaults yourself.
 
-To uninstall, use Windows **Settings → Apps → Installed apps → Museek**, or run `scripts\Uninstall.ps1`. Audio files are not deleted.
+To uninstall, run **`%LOCALAPPDATA%\Programs\Museek\uninstall.exe`**, or choose **Museek → Uninstall** in Windows **Settings → Apps → Installed apps**. This removes installed program files, the Start menu shortcut and Museek's owned Windows registrations. Audio files, unrelated files placed in the install folder and settings in `%LOCALAPPDATA%\Museek` are kept.
+
+Setup and uninstall also accept `/S` for silent operation. Windows file defaults remain your choice.
 
 ## Keyboard
 
@@ -59,7 +53,9 @@ Install the [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0), th
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Build.ps1
 ```
 
-The script restores the pinned VLC and TagLibSharp packages, downloads FFmpeg essentials with checksum verification, publishes a self-contained x64 app into `dist\Museek`, and runs the core, audio-export, artwork, single-window, tag-editing and native UI checks. Supply `-FfmpegDirectory C:\path\to\bin` to use an existing FFmpeg build. Tests also require FFmpeg/FFprobe on PATH; the UI harness uses the bundled tools when available. A local SDK at `.tools\dotnet` is detected automatically.
+The script restores the pinned VLC and TagLibSharp packages, downloads FFmpeg essentials with checksum verification, publishes a self-contained x64 app into `dist\Museek` and builds **`dist\setup.exe`** with NSIS 3.13. The portable compiler downloads into `.tools` with a pinned SHA256; no tool installation is needed. Supply `-MakensisPath C:\path\to\makensis.exe` to use an existing compiler, or `-FfmpegDirectory C:\path\to\bin` for an existing FFmpeg build. A local SDK at `.tools\dotnet` is detected automatically.
+
+Build runs the core, audio-export, artwork, single-window, tag-editing, registration and native UI checks, plus real setup/update/uninstall tests using a separate test app and isolated Windows registrations. Tests require FFmpeg/FFprobe on PATH; Build supplies it. Use `-SkipChecks` when only packaging an already verified build. To rebuild setup from an existing published app, run `scripts\Build-Installer.ps1`.
 
 Source lives in `src\Museek`. The small selection model is in `src\Museek.Core`. Test screenshots are written into `artifacts`.
 

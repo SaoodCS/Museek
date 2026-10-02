@@ -2,6 +2,7 @@
 param(
     [string]$DotNetPath,
     [string]$FfmpegDirectory,
+    [string]$MakensisPath,
     [switch]$SkipChecks
 )
 
@@ -56,7 +57,11 @@ try {
     New-Item -ItemType Directory -Path $tools -Force | Out-Null
     Copy-Item -LiteralPath (Join-Path $FfmpegDirectory 'ffmpeg.exe'), (Join-Path $FfmpegDirectory 'ffprobe.exe') -Destination $tools -Force
     Copy-Item -LiteralPath (Join-Path $projectRoot 'README.md'), (Join-Path $projectRoot 'THIRD-PARTY-NOTICES.md') -Destination $output -Force
-    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Install.ps1'), (Join-Path $PSScriptRoot 'Uninstall.ps1'), (Join-Path $PSScriptRoot 'Install.cmd') -Destination $output -Force
+    # Retire files copied by the old script-based distribution.
+    foreach ($legacy in @('Install.ps1', 'Uninstall.ps1', 'Install.cmd')) {
+        $legacyPath = Join-Path $output $legacy
+        if (Test-Path -LiteralPath $legacyPath -PathType Leaf) { Remove-Item -LiteralPath $legacyPath -Force }
+    }
     $licenses = Join-Path $output 'licenses'
     New-Item -ItemType Directory -Path $licenses -Force | Out-Null
     Get-ChildItem -LiteralPath (Join-Path $projectRoot 'licenses') -File |
@@ -69,11 +74,15 @@ try {
         $originalPath = $env:PATH
         try {
             $env:PATH = $FfmpegDirectory + ';' + $originalPath
-            foreach ($check in @('CoreChecks', 'ExportChecks', 'ArtworkChecks', 'InstanceChecks', 'TagChecks', 'UiChecks')) {
+            foreach ($check in @('CoreChecks', 'ExportChecks', 'ArtworkChecks', 'InstanceChecks', 'TagChecks', 'RegistrationChecks', 'UiChecks')) {
                 & $DotNetPath run --project (Join-Path $projectRoot "tests\$check") -c Release
                 if ($LASTEXITCODE -ne 0) { throw "$check failed." }
             }
         } finally { $env:PATH = $originalPath }
+    }
+    & (Join-Path $PSScriptRoot 'Build-Installer.ps1') -MakensisPath $MakensisPath
+    if (-not $SkipChecks) {
+        & (Join-Path $projectRoot 'tests\InstallerChecks.ps1') -NsisPath $MakensisPath -DotNetPath $DotNetPath
     }
     Write-Host "Ready: $output\Museek.exe"
 } finally { Pop-Location }

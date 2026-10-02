@@ -25,20 +25,15 @@ public static class WindowsIntegrationService
         ".dsf", ".dff"
     });
 
-    public static void Register(string executablePath)
+    // An isolation root represents a synthetic HKCU for tests and never notifies Explorer.
+    public static void Register(string executablePath, RegistryKey? isolationRoot = null)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(executablePath);
-        var fullPath = Path.GetFullPath(executablePath);
-        if (!File.Exists(fullPath) ||
-            !string.Equals(Path.GetFileName(fullPath), "Museek.exe", StringComparison.OrdinalIgnoreCase))
-        {
-            throw new ArgumentException("Registration requires an existing Museek.exe.", nameof(executablePath));
-        }
-
+        var fullPath = NormalizeExecutable(executablePath, mustExist: true);
+        var root = isolationRoot ?? Registry.CurrentUser;
         var command = $"\"{fullPath}\" \"%1\"";
         var icon = $"\"{fullPath}\",0";
 
-        using (var progId = Registry.CurrentUser.CreateSubKey($@"Software\Classes\{ProgId}"))
+        using (var progId = root.CreateSubKey($@"Software\Classes\{ProgId}"))
         {
             progId.SetValue("", "Museek audio file", RegistryValueKind.String);
             progId.SetValue("FriendlyTypeName", "Museek audio file", RegistryValueKind.String);
@@ -50,7 +45,7 @@ public static class WindowsIntegrationService
             openCommand.SetValue("", command, RegistryValueKind.String);
         }
 
-        using (var application = Registry.CurrentUser.CreateSubKey(@"Software\Classes\Applications\Museek.exe"))
+        using (var application = root.CreateSubKey(@"Software\Classes\Applications\Museek.exe"))
         {
             application.SetValue("FriendlyAppName", ApplicationName, RegistryValueKind.String);
             using var openCommand = application.CreateSubKey(@"shell\open\command");
@@ -60,7 +55,7 @@ public static class WindowsIntegrationService
                 supportedTypes.SetValue(extension, "", RegistryValueKind.String);
         }
 
-        using (var capabilities = Registry.CurrentUser.CreateSubKey(CapabilitiesPath))
+        using (var capabilities = root.CreateSubKey(CapabilitiesPath))
         {
             capabilities.SetValue("ApplicationName", ApplicationName, RegistryValueKind.String);
             capabilities.SetValue("ApplicationDescription", "Play your local music and audio files with Museek.", RegistryValueKind.String);
@@ -72,18 +67,92 @@ public static class WindowsIntegrationService
 
         foreach (var extension in SupportedExtensions)
         {
-            using var openWith = Registry.CurrentUser.CreateSubKey($@"Software\Classes\{extension}\OpenWithProgids");
+            using var openWith = root.CreateSubKey($@"Software\Classes\{extension}\OpenWithProgids");
             openWith.SetValue(ProgId, Array.Empty<byte>(), RegistryValueKind.None);
         }
 
-        using (var registered = Registry.CurrentUser.CreateSubKey(@"Software\RegisteredApplications"))
+        using (var registered = root.CreateSubKey(@"Software\RegisteredApplications"))
             registered.SetValue(ApplicationName, CapabilitiesPath, RegistryValueKind.String);
 
         // This marker lets the uninstaller preserve registration belonging to another copy.
-        using (var application = Registry.CurrentUser.CreateSubKey(@"Software\Museek"))
+        using (var application = root.CreateSubKey(@"Software\Museek"))
             application.SetValue("ExecutablePath", fullPath, RegistryValueKind.String);
 
-        SHChangeNotify(0x08000000, 0, IntPtr.Zero, IntPtr.Zero); // SHCNE_ASSOCCHANGED
+        NotifyShell(isolationRoot);
+    }
+
+    /// <summary>Removes only associations owned by this Museek executable, preserving user defaults.</summary>
+    public static void Unregister(string executablePath, RegistryKey? isolationRoot = null)
+    {
+        var fullPath = NormalizeExecutable(executablePath, mustExist: false);
+        var root = isolationRoot ?? Registry.CurrentUser;
+        var command = $"\"{fullPath}\" \"%1\"";
+        var ownsProgId = HasValue(root, $@"Software\Classes\{ProgId}\shell\open\command", "", command);
+        var ownsApplication = HasValue(root, @"Software\Classes\Applications\Museek.exe\shell\open\command", "", command);
+        var ownsCapabilities = HasValue(root, @"Software\Museek", "ExecutablePath", fullPath);
+
+        if (ownsProgId)
+        {
+            // Custom extensions may have gained our ProgID after installation. Leave each extension
+            // and every other application's entries intact, including default and UserChoice values.
+            using var classes = root.OpenSubKey(@"Software\Classes", writable: true);
+            if (classes is not null)
+                foreach (var extension in classes.GetSubKeyNames())
+                {
+                    if (!extension.StartsWith('.')) continue;
+                    using var openWith = classes.OpenSubKey($@"{extension}\OpenWithProgids", writable: true);
+                    openWith?.DeleteValue(ProgId, throwOnMissingValue: false);
+                }
+            root.DeleteSubKeyTree($@"Software\Classes\{ProgId}", throwOnMissingSubKey: false);
+        }
+
+        if (ownsApplication)
+            root.DeleteSubKeyTree(@"Software\Classes\Applications\Museek.exe", throwOnMissingSubKey: false);
+
+        if (ownsCapabilities)
+        {
+            using (var registered = root.OpenSubKey(@"Software\RegisteredApplications", writable: true))
+                if (SameValue(registered?.GetValue(ApplicationName), CapabilitiesPath))
+                    registered!.DeleteValue(ApplicationName, throwOnMissingValue: false);
+            root.DeleteSubKeyTree(CapabilitiesPath, throwOnMissingSubKey: false);
+            var empty = false;
+            using (var application = root.OpenSubKey(@"Software\Museek", writable: true))
+            {
+                if (application is not null)
+                {
+                    application.DeleteValue("ExecutablePath", throwOnMissingValue: false);
+                    empty = application.SubKeyCount == 0 && application.ValueCount == 0;
+                }
+            }
+            if (empty) root.DeleteSubKey(@"Software\Museek", throwOnMissingSubKey: false);
+        }
+        NotifyShell(isolationRoot);
+    }
+
+    private static string NormalizeExecutable(string executablePath, bool mustExist)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(executablePath);
+        var fullPath = Path.GetFullPath(executablePath);
+        if (fullPath.Contains('"') ||
+            !Path.GetFileName(fullPath).Equals("Museek.exe", StringComparison.OrdinalIgnoreCase) ||
+            (mustExist && !File.Exists(fullPath)))
+            throw new ArgumentException(mustExist ? "Registration requires an existing Museek.exe." :
+                "Unregistration requires the path of Museek.exe.", nameof(executablePath));
+        return fullPath;
+    }
+
+    private static bool HasValue(RegistryKey root, string keyPath, string valueName, string expected)
+    {
+        using var key = root.OpenSubKey(keyPath);
+        return SameValue(key?.GetValue(valueName), expected);
+    }
+
+    private static bool SameValue(object? value, string expected) => value is string text &&
+        text.Equals(expected, StringComparison.OrdinalIgnoreCase);
+
+    private static void NotifyShell(RegistryKey? isolationRoot)
+    {
+        if (isolationRoot is null) SHChangeNotify(0x08000000, 0, IntPtr.Zero, IntPtr.Zero); // SHCNE_ASSOCCHANGED
     }
 
     public static void OpenDefaultAppsSettings()

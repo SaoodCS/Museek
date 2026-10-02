@@ -17,21 +17,34 @@ public partial class App : Application
     {
         base.OnStartup(e);
         // Registration is explicit, never silently changes the user's defaults.
-        if (e.Args.Length == 1 && e.Args[0] == "--register")
+        var registrationCommand = e.Args.FirstOrDefault();
+        if (registrationCommand is "--register" or "--unregister" &&
+            e.Args.Length <= 2 && e.Args.Skip(1).All(argument => argument == "--quiet"))
         {
+            var quiet = e.Args.Contains("--quiet");
             try
             {
-                WindowsIntegrationService.Register(Environment.ProcessPath
-                    ?? throw new InvalidOperationException("Cannot locate Museek.exe."));
-                var settings = new AppSettingsService();
-                try { settings.Reload(); }
-                catch (Exception ex) { Debug.WriteLine($"Optional tag-menu preferences could not be read: {ex.Message}"); }
-                if (settings.EditTagsContextMenu) TagContextMenuService.Register(Environment.ProcessPath!);
+                var executable = Environment.ProcessPath
+                    ?? throw new InvalidOperationException("Cannot locate Museek.exe.");
+                if (registrationCommand == "--unregister")
+                {
+                    TagContextMenuService.Unregister(executable);
+                    WindowsIntegrationService.Unregister(executable);
+                }
+                else
+                {
+                    WindowsIntegrationService.Register(executable);
+                    var settings = new AppSettingsService();
+                    try { settings.Reload(); }
+                    catch (Exception ex) { Debug.WriteLine($"Optional tag-menu preferences could not be read: {ex.Message}"); }
+                    if (settings.EditTagsContextMenu) TagContextMenuService.Register(executable);
+                }
                 Shutdown(0);
             }
             catch (Exception ex)
             {
-                MessageBox.Show(ex.Message, "Museek registration", MessageBoxButton.OK, MessageBoxImage.Error);
+                Debug.WriteLine($"Museek {registrationCommand} failed: {ex}");
+                if (!quiet) MessageBox.Show(ex.Message, "Museek registration", MessageBoxButton.OK, MessageBoxImage.Error);
                 Shutdown(1);
             }
             return;
