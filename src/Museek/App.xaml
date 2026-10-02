@@ -5,6 +5,57 @@
   <Application.Resources>
     <SolidColorBrush x:Key="Accent" Color="#C5F277" />
     <SolidColorBrush x:Key="Muted" Color="#93998F" />
+    <Style TargetType="MenuItem">
+      <Setter Property="Foreground" Value="#EDEFE8" />
+      <Setter Property="Background" Value="#252B21" />
+      <Setter Property="Padding" Value="12,8" />
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="MenuItem">
+            <Border x:Name="MenuSurface" Background="{TemplateBinding Background}" CornerRadius="5" Padding="{TemplateBinding Padding}">
+              <Grid>
+                <Grid.ColumnDefinitions><ColumnDefinition Width="18" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                <Path x:Name="CheckGlyph" Data="M 0,4 L 3,7 L 10,0" Width="10" Height="8" Stroke="{StaticResource Accent}" StrokeThickness="1.8" StrokeStartLineCap="Round" StrokeEndLineCap="Round" Visibility="Hidden" VerticalAlignment="Center" />
+                <ContentPresenter Grid.Column="1" ContentSource="Header" RecognizesAccessKey="True" />
+              </Grid>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsHighlighted" Value="True"><Setter TargetName="MenuSurface" Property="Background" Value="#3B4430" /><Setter Property="Foreground" Value="{StaticResource Accent}" /></Trigger>
+              <Trigger Property="IsChecked" Value="True"><Setter TargetName="CheckGlyph" Property="Visibility" Value="Visible" /></Trigger>
+              <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.4" /></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style x:Key="TopMenuStyle" TargetType="MenuItem" BasedOn="{StaticResource {x:Type MenuItem}}">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="Padding" Value="12,5" />
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="MenuItem">
+            <Grid>
+              <Border x:Name="HeaderSurface" Background="{TemplateBinding Background}" CornerRadius="5" Padding="{TemplateBinding Padding}">
+                <ContentPresenter ContentSource="Header" RecognizesAccessKey="True" />
+              </Border>
+              <Popup x:Name="PART_Popup" Placement="Bottom" IsOpen="{Binding IsSubmenuOpen, RelativeSource={RelativeSource TemplatedParent}}" AllowsTransparency="True" Focusable="False" PopupAnimation="Fade">
+                <Border Background="#252B21" BorderBrush="#3D4537" BorderThickness="1" CornerRadius="8" Padding="4" Margin="0,4,0,0">
+                  <StackPanel IsItemsHost="True" KeyboardNavigation.DirectionalNavigation="Cycle" />
+                </Border>
+              </Popup>
+            </Grid>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsHighlighted" Value="True"><Setter TargetName="HeaderSurface" Property="Background" Value="#30352D" /></Trigger>
+              <Trigger Property="IsSubmenuOpen" Value="True"><Setter TargetName="HeaderSurface" Property="Background" Value="#30352D" /><Setter Property="Foreground" Value="{StaticResource Accent}" /></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style x:Key="MenuSeparatorStyle" TargetType="Separator">
+      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Separator"><Border Height="1" Background="#3D4537" Margin="8,4" /></ControlTemplate></Setter.Value></Setter>
+    </Style>
     <Style TargetType="Button">
       <Setter Property="Foreground" Value="#EDEFE8" />
       <Setter Property="Background" Value="#30352D" />

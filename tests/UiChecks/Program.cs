@@ -4,6 +4,8 @@ using System.Reflection;
 using System.Security.Cryptography;
 using System.Windows;
 using System.Windows.Automation;
+using System.Windows.Automation.Peers;
+using System.Windows.Automation.Provider;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Documents;
@@ -21,6 +23,7 @@ namespace Museek.UiChecks;
 
 internal static class Program
 {
+    private static int _checks;
     private const string FixtureArtist = "Museek artist — 音楽";
     private const string FixtureAlbum = "Museek album";
 
@@ -48,7 +51,7 @@ internal static class Program
             {
                 await RunChecksAsync(artifacts);
                 exitCode = 0;
-                Console.WriteLine("All silent WPF UI and native playback checks passed.");
+                Console.WriteLine($"All {_checks} silent WPF UI and native playback checks passed.");
             }
             catch (Exception exception) { Console.Error.WriteLine(exception); }
             finally
@@ -96,7 +99,9 @@ internal static class Program
                 "-metadata", "artist=Covered artist", "-metadata", "album=Covered album",
                 "-metadata:s:v", "title=Album cover", "-metadata:s:v", "comment=Cover (front)", "-y", covered);
 
-            window = new MainWindow();
+            var settingsPath = Path.Combine(fixtureDirectory, "isolated settings.json");
+            var settings = new AppSettingsService(settingsPath);
+            window = new MainWindow(initialPath: untagged, settings: settings);
             var volume = Find<Slider>(window, "VolumeSlider");
             volume.Value = 0;
             var player = (AudioPlayerService)(typeof(MainWindow).GetField("_player",
@@ -120,6 +125,7 @@ internal static class Program
 
             var seek = Find<RangeSeekBar>(window, "SeekBar");
             var play = Find<Button>(window, "PlayButton");
+            var stop = Find<Button>(window, "StopButton");
             var trim = Find<Button>(window, "TrimButton");
             var save = Find<Button>(window, "SaveButton");
             var cancel = Find<Button>(window, "CancelButton");
@@ -133,10 +139,19 @@ internal static class Program
                 "the player omits the mode slogan in both playback and trim layouts");
             CheckArtworkPlaceholder(window, "an empty player shows the artwork placeholder");
             CheckSongMetadata(window, null, null, "an empty player collapses the artist and album lines");
-            Check(!play.IsEnabled && !trim.IsEnabled && !seek.IsEnabled,
-                "empty player disables playback, seeking, and trimming");
+            Check(!play.IsEnabled && !stop.IsEnabled && !trim.IsEnabled && !seek.IsEnabled,
+                "empty player disables playback, Stop, seeking, and trimming");
+            CheckMenus(window, surface, artifacts, settings, settingsPath);
 
-            await OpenAsync(window, source);
+            Check(window.AcceptOpenRequest(covered) && window.AcceptOpenRequest(source) &&
+                ReadField<string?>(window, "_queuedOpenPath") == source && ReadField<string?>(window, "_sourcePath") is null,
+                "launches received before Loaded queue only the latest file");
+            InvokeWindowMethod(window, "Window_Loaded", window, new RoutedEventArgs());
+            Check(!stop.IsEnabled && !play.IsEnabled && !seek.IsEnabled,
+                "loading audio disables Stop and the other playback controls");
+            await WaitUntilAsync(() => ReadField<string?>(window, "_sourcePath") == source &&
+                !ReadField<bool>(window, "_loading"),
+                "Loaded opens the latest queued launch instead of the constructor's initial file");
             Check(Find<TextBlock>(window, "SongTitle").Text == title && window.Title.Contains(title),
                 "opening a Unicode path displays its metadata title");
             CheckSongMetadata(window, FixtureArtist, FixtureAlbum,
@@ -144,9 +159,12 @@ internal static class Program
             CheckMetadataLayout(window, surface, "artist and album appear in order below the title");
             Check(Math.Abs(seek.Duration - 12) < 0.01 && Find<TextBlock>(window, "TotalTime").Text == "0:12",
                 "opening audio updates both seek duration and total time");
-            Check(play.IsEnabled && trim.IsEnabled && seek.IsEnabled,
-                "loaded audio enables playback, seeking, and trimming");
+            Check(play.IsEnabled && stop.IsEnabled && trim.IsEnabled && seek.IsEnabled,
+                "loaded audio enables playback, Stop, seeking, and trimming");
             CheckArtworkPlaceholder(window, "audio without embedded artwork keeps the placeholder");
+            Check(window.AcceptOpenRequest(null) && ReadField<string?>(window, "_sourcePath") == source &&
+                ReadField<string?>(window, "_queuedOpenPath") is null,
+                "an activation-only launch preserves the loaded song and clears no source state");
             await WaitUntilAsync(() => player.IsPlaying && player.Position > 0.15,
                 "opening audio autoplays through the native VLC player");
             Check(AutomationProperties.GetName(play) == "Pause", "autoplay exposes the pause action");
@@ -230,7 +248,8 @@ internal static class Program
             await WaitUntilAsync(() => player.IsPlaying, "normal playback resumes before the EOF seek check");
             Drag(playhead, 100_000);
             await WaitUntilAsync(() => player.HasEnded && AutomationProperties.GetName(play) == "Play",
-                "seeking to the file end reaches EOF and exposes replay");
+                "seeking to the file end reaches EOF and exposes replay",
+                () => PlaybackState(window));
             Drag(playhead, -(track.ActualWidth - 24) / 2);
             await WaitUntilAsync(() => player.IsPlaying && player.Position >= 5.9 && player.Position < 6.8,
                 "seeking after EOF restarts native playback at the requested midpoint");
@@ -257,6 +276,9 @@ internal static class Program
             await WaitUntilAsync(() => !player.IsPlaying, "pending-seek regression playback can be paused");
             Click(cancel);
 
+            await CheckStopAsync(window, surface);
+            await CheckQueuedEofTrimAsync(window, surface);
+            await CheckQueuedOpenRequestsAsync(window, source, untagged, covered);
             await CheckArtworkChangesAsync(window, source, untagged, artistOnly, albumOnly, covered, surface, artifacts);
             await OpenAsync(window, Path.Combine(fixtureDirectory, "missing audio.wav"));
             CheckErrorState(window, "missing audio shows an error and disables stale playback controls");
@@ -295,6 +317,271 @@ internal static class Program
                 artifacts, StringComparison.OrdinalIgnoreCase)) Directory.Delete(fixtureDirectory, recursive: true);
         }
     }
+
+    private static async Task CheckStopAsync(MainWindow window, FrameworkElement surface)
+    {
+        var player = ReadField<AudioPlayerService>(window, "_player");
+        var seek = Find<RangeSeekBar>(window, "SeekBar");
+        var play = Find<Button>(window, "PlayButton");
+        var stop = Find<Button>(window, "StopButton");
+        var trim = Find<Button>(window, "TrimButton");
+        var cancel = Find<Button>(window, "CancelButton");
+        var playhead = Find<Thumb>(seek, "Playhead");
+        var start = Find<Thumb>(seek, "StartHandle");
+        var end = Find<Thumb>(seek, "EndHandle");
+        Layout(surface);
+        var trackWidth = Find<Canvas>(seek, "Surface").ActualWidth - 24;
+
+        Click(play);
+        await WaitUntilAsync(() => player.IsPlaying, "Stop setup resumes native playback");
+        Click(stop);
+        await CheckStoppedAsync(window, 0, "0:00", "Stop during playback resets the song and stays at zero");
+        Click(play);
+        await WaitUntilAsync(() => player.IsPlaying && player.Position > 0.15 && player.Position < 1.2,
+            "Play after Stop restarts the song from its beginning");
+        Click(play);
+        await WaitUntilAsync(() => !player.IsPlaying, "Stop setup pauses native playback");
+        Drag(playhead, -100_000);
+        Drag(playhead, trackWidth / 4);
+        await WaitUntilAsync(() => Math.Abs(player.Position - 3) < 0.2,
+            "paused Stop setup seeks away from the song start");
+        Click(stop);
+        await CheckStoppedAsync(window, 0, "0:00", "Stop while paused resets the song to zero");
+
+        Drag(playhead, trackWidth / 3);
+        await Task.Delay(200);
+        Check(!player.IsPlaying && Math.Abs(seek.Position - 4) < 0.01 &&
+            Find<TextBlock>(window, "CurrentTime").Text == "0:04",
+            "seeking after Stop moves the cursor without starting playback");
+        Click(play);
+        Click(play); // Both clicks precede a dispatcher tick: the queued seek has not applied.
+        await CheckStoppedAsync(window, 4, "0:04", "rapid Play then Pause preserves a stopped song seek");
+        Click(play);
+        await WaitUntilAsync(() => player.IsPlaying && player.Position >= 3.9 && player.Position < 4.8,
+            "Play after a stopped seek starts at the requested position");
+        Drag(playhead, 100_000);
+        await WaitUntilAsync(() => player.HasEnded && AutomationProperties.GetName(play) == "Play",
+            "Stop setup reaches the end of the song", () => PlaybackState(window));
+        Click(stop);
+        await CheckStoppedAsync(window, 0, "0:00", "Stop after EOF clears the ended state and resets the song");
+
+        Click(trim);
+        Drag(start, trackWidth / 4);
+        Drag(end, -trackWidth / 4);
+        Check(Math.Abs(seek.SelectionStart - 3) < 0.01 && Math.Abs(seek.SelectionEnd - 9) < 0.01,
+            "trim Stop setup selects three through nine seconds");
+        Click(play);
+        await WaitUntilAsync(() => player.IsPlaying && player.Position >= 2.9 && player.Position < 3.8,
+            "a stopped trim preview starts at the selected start");
+        Click(stop);
+        await CheckStoppedAsync(window, 3, "0:03", "Stop during trim resets exactly to its selected start");
+        Drag(start, trackWidth / 6);
+        await CheckStoppedAsync(window, 5, "0:05", "changing the trim start after Stop clamps the stopped cursor");
+        Drag(playhead, trackWidth / 12);
+        await Task.Delay(200);
+        Check(!player.IsPlaying && Math.Abs(seek.Position - 6) < 0.01 &&
+            Find<TextBlock>(window, "CurrentTime").Text == "0:06",
+            "seeking after a trim Stop moves the cursor within the selection silently");
+        Click(play);
+        Click(play);
+        await CheckStoppedAsync(window, 6, "0:06", "rapid Play then Pause preserves a stopped trim seek");
+        Click(play);
+        await WaitUntilAsync(() => player.IsPlaying && player.Position >= 5.9 && player.Position < 6.8,
+            "Play after a stopped trim seek starts at the newly requested position");
+        Click(stop);
+        await CheckStoppedAsync(window, 5, "0:05", "a later trim Stop returns to the updated selection start");
+        Click(cancel);
+        Click(stop);
+        await CheckStoppedAsync(window, 0, "0:00", "Stop after cancelling trim resets to the whole song start");
+        CheckSongMetadata(window, FixtureArtist, FixtureAlbum,
+            "Stop and seeking after Stop preserve the current song's artist and album");
+    }
+
+    private static async Task CheckStoppedAsync(MainWindow window, double position, string time, string description)
+    {
+        var player = ReadField<AudioPlayerService>(window, "_player");
+        await WaitUntilAsync(() => !player.IsPlaying && !player.HasEnded && player.Position == 0,
+            description + " (native player stopped)");
+        await Task.Delay(200); // More than two timer ticks: a stale native time must not overwrite the reset.
+        Check(Math.Abs(Find<RangeSeekBar>(window, "SeekBar").Position - position) < 0.01 &&
+            Find<TextBlock>(window, "CurrentTime").Text == time &&
+            AutomationProperties.GetName(Find<Button>(window, "PlayButton")) == "Play", description);
+    }
+
+    private static async Task CheckQueuedEofTrimAsync(MainWindow window, FrameworkElement surface)
+    {
+        var player = ReadField<AudioPlayerService>(window, "_player");
+        var timer = ReadField<DispatcherTimer>(window, "_timer");
+        var seek = Find<RangeSeekBar>(window, "SeekBar");
+        var play = Find<Button>(window, "PlayButton");
+        Layout(surface);
+        var trackWidth = Find<Canvas>(seek, "Surface").ActualWidth - 24;
+        Click(play);
+        await WaitUntilAsync(() => player.IsPlaying && ReadField<double?>(window, "_pendingSeek") is null,
+            "queued EOF trim setup starts native playback");
+        Drag(Find<Thumb>(seek, "Playhead"), 100_000);
+        await WaitUntilAsync(() => player.HasEnded && AutomationProperties.GetName(play) == "Play",
+            "queued EOF trim setup reaches real native EOF", () => PlaybackState(window));
+
+        // Freeze the timer to recreate EOF arriving before a queued seek is consumed.
+        timer.Stop();
+        try
+        {
+            Click(Find<Button>(window, "TrimButton"));
+            SetField(window, "_pendingSeek", seek.Duration);
+            SetField(window, "_wantsPlayback", true);
+            Drag(Find<Thumb>(seek, "EndHandle"), -trackWidth / 4);
+            Check(player.HasEnded && Math.Abs(seek.SelectionEnd - 9) < 0.01 &&
+                Math.Abs(ReadField<double?>(window, "_pendingSeek")!.Value - 9) < 0.01,
+                "moving the trim end clamps an unconsumed EOF seek inside the ended file");
+        }
+        finally { timer.Start(); }
+
+        await WaitUntilAsync(() => !player.IsPlaying && !player.HasEnded &&
+            ReadField<double?>(window, "_pendingSeek") is null && Math.Abs(player.Position - 9) < 0.5 &&
+            Math.Abs(seek.Position - 9) < 0.03 && AutomationProperties.GetName(play) == "Play",
+            "an EOF seek clamped into trim restarts, reaches the selected end, and exposes Play",
+            () => PlaybackState(window));
+        Click(Find<Button>(window, "CancelButton"));
+    }
+
+    private static void CheckMenus(MainWindow window, FrameworkElement surface, string artifacts,
+        AppSettingsService settings, string settingsPath)
+    {
+        var menu = Find<Menu>(window, "MenuBar");
+        var tools = Find<MenuItem>(window, "ToolsMenu");
+        var help = Find<MenuItem>(window, "HelpMenu");
+        var toolsEntries = tools.Items.OfType<MenuItem>().ToArray();
+        var helpEntries = help.Items.OfType<MenuItem>().ToArray();
+        var singleWindow = Find<MenuItem>(window, "SingleWindowModeMenuItem");
+        Check(menu.Items.Count == 2 && ReferenceEquals(menu.Items[0], tools) &&
+            ReferenceEquals(menu.Items[1], help) &&
+            (tools.Header?.ToString() ?? "").Replace("_", "") == "Tools" &&
+            toolsEntries.Length == 2 && toolsEntries[0].Header?.ToString() == "Choose Museek as default…" &&
+            ReferenceEquals(toolsEntries[1], singleWindow) && singleWindow.IsCheckable &&
+            singleWindow.Header?.ToString() == "Single-window mode",
+            "Tools contains Default Apps and the checkable Single-window mode setting");
+        Check((help.Header?.ToString() ?? "").Replace("_", "") == "Help" && helpEntries.Length == 1 &&
+            helpEntries[0].Header?.ToString() == "About Museek",
+            "Help contains only About Museek");
+        Layout(surface);
+        Check(menu.TranslatePoint(new Point(), surface).Y <= 8 && menu.ActualHeight > 0,
+            "Tools and Help sit at the top of the client content below the native title bar");
+        var entries = toolsEntries.Concat(helpEntries).ToArray();
+        foreach (var entry in entries) entry.ApplyTemplate();
+        Check(IsDark(menu.Background) && IsLight(menu.Foreground) && IsLight(tools.Foreground) && IsLight(help.Foreground) &&
+            entries.All(entry => IsDark(entry.Background) && IsLight(entry.Foreground)),
+            "both menus and their entries use matching dark backgrounds and readable text");
+
+        var helpBody = LayoutClosedMenu(help);
+        Snapshot(helpBody, Path.Combine(artifacts, "help-menu.png"), layout: false);
+        var toolsBody = LayoutClosedMenu(tools);
+        Check(entries.All(entry => entry.ActualWidth > 100 && entry.ActualHeight > 0),
+            "both closed menu popups lay out their action labels offscreen");
+
+        Check(!settings.SingleWindowMode && !window.SingleWindowMode && !singleWindow.IsChecked,
+            "an isolated fresh settings file initializes single-window mode unchecked");
+        var glyph = singleWindow.Template.FindName("CheckGlyph", singleWindow) as System.Windows.Shapes.Path
+            ?? throw new Exception("Single-window mode's visible checkmark was not found.");
+        Check(glyph.Visibility != Visibility.Visible, "unchecked single-window mode hides its checkmark");
+        Snapshot(toolsBody, Path.Combine(artifacts, "tools-menu.png"), layout: false);
+
+        var changes = 0;
+        window.SingleWindowModeChanged += (_, _) => changes++;
+        var toggle = new MenuItemAutomationPeer(singleWindow).GetPattern(PatternInterface.Toggle) as IToggleProvider
+            ?? throw new Exception("Single-window mode's WPF toggle provider was not found.");
+        toggle.Toggle();
+        toolsBody = LayoutClosedMenu(tools);
+        Check(singleWindow.IsChecked && window.SingleWindowMode && ReadSingleWindowMode(settingsPath) && changes == 1,
+            "toggling the menu enables and persists single-window mode and raises its change event");
+        Check(glyph.Visibility == Visibility.Visible && HasRenderedInk(glyph),
+            "checked single-window mode renders its actual checkmark geometry");
+        Snapshot(toolsBody, Path.Combine(artifacts, "tools-menu-checked.png"), layout: false);
+        toggle.Toggle();
+        Check(!singleWindow.IsChecked && !window.SingleWindowMode && !ReadSingleWindowMode(settingsPath) &&
+            changes == 2 && glyph.Visibility != Visibility.Visible,
+            "toggling the menu off persists disabled mode and removes its checkmark");
+        Check(!tools.IsSubmenuOpen && !help.IsSubmenuOpen && new WindowInteropHelper(window).Handle == IntPtr.Zero,
+            "menu toggles and renders create no native popup or player window");
+    }
+
+    private static async Task CheckQueuedOpenRequestsAsync(MainWindow window, string source, string untagged, string covered)
+    {
+        SetField(window, "_exporting", true);
+        try
+        {
+            Check(window.AcceptOpenRequest(untagged) && window.AcceptOpenRequest(covered) &&
+                ReadField<string?>(window, "_sourcePath") == source && ReadField<string?>(window, "_queuedOpenPath") == covered,
+                "launches during saving retain the current song and queue only the latest replacement");
+            InvokeWindowMethod(window, "OpenQueuedFile");
+            Check(ReadField<string?>(window, "_queuedOpenPath") == covered && ReadField<string?>(window, "_sourcePath") == source,
+                "queued audio cannot open while export cleanup is still busy");
+        }
+        finally { SetField(window, "_exporting", false); }
+        InvokeWindowMethod(window, "OpenQueuedFile");
+        await WaitUntilAsync(() => ReadField<string?>(window, "_sourcePath") == covered &&
+            !ReadField<bool>(window, "_loading") && ReadField<AudioPlayerService>(window, "_player").IsPlaying,
+            "saving cleanup consumes the latest queued file and starts its native playback");
+        Check(ReadField<string?>(window, "_queuedOpenPath") is null &&
+            Find<TextBlock>(window, "SongTitle").Text == "Covered UI fixture",
+            "opening a queued file clears its queue and displays the new title");
+
+        SetField(window, "_fileDialogOpen", true);
+        try
+        {
+            Check(window.AcceptOpenRequest(source) && window.AcceptOpenRequest(untagged) && window.AcceptOpenRequest(null) &&
+                ReadField<string?>(window, "_queuedOpenPath") == untagged && ReadField<string?>(window, "_sourcePath") == covered,
+                "a busy file picker retains the latest file request across activation-only launches");
+            InvokeWindowMethod(window, "OpenQueuedFile");
+            Check(ReadField<string?>(window, "_queuedOpenPath") == untagged,
+                "queued audio waits until the file picker finishes");
+        }
+        finally { SetField(window, "_fileDialogOpen", false); }
+        InvokeWindowMethod(window, "OpenQueuedFile");
+        await WaitUntilAsync(() => ReadField<string?>(window, "_sourcePath") == untagged &&
+            !ReadField<bool>(window, "_loading") && ReadField<string?>(window, "_queuedOpenPath") is null,
+            "file picker cleanup opens and clears its latest queued request");
+        CheckSongMetadata(window, null, null, "a queued untagged song clears the replaced song's metadata");
+    }
+
+    private static Border LayoutClosedMenu(MenuItem item)
+    {
+        item.ApplyTemplate();
+        var popup = item.Template.FindName("PART_Popup", item) as Popup
+            ?? throw new Exception("The menu popup template was not found.");
+        var body = popup.Child as Border ?? throw new Exception("The menu popup body was not found.");
+        Check(!item.IsSubmenuOpen && !popup.IsOpen && IsDark(body.Background),
+            item.Header + " has a dark popup surface while remaining closed");
+        body.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+        body.Arrange(new Rect(new Point(), body.DesiredSize));
+        body.UpdateLayout();
+        return body;
+    }
+
+    private static bool ReadSingleWindowMode(string path)
+    {
+        var settings = new AppSettingsService(path);
+        settings.Reload();
+        return settings.SingleWindowMode;
+    }
+
+    private static bool HasRenderedInk(FrameworkElement element)
+    {
+        var width = (int)Math.Ceiling(element.ActualWidth);
+        var height = (int)Math.Ceiling(element.ActualHeight);
+        if (width <= 0 || height <= 0) return false;
+        var bitmap = new RenderTargetBitmap(width, height, 96, 96, PixelFormats.Pbgra32);
+        bitmap.Render(element);
+        var pixels = new byte[width * height * 4];
+        bitmap.CopyPixels(pixels, width * 4, 0);
+        return Enumerable.Range(0, width * height).Count(pixel => pixels[pixel * 4 + 3] > 0) >= 3;
+    }
+
+    private static bool IsDark(Brush brush)
+        => brush is SolidColorBrush { Color: var color } && color.A > 0 && Math.Max(color.R, Math.Max(color.G, color.B)) < 90;
+
+    private static bool IsLight(Brush brush)
+        => brush is SolidColorBrush { Color: var color } && Math.Min(color.R, Math.Min(color.G, color.B)) > 140;
 
     private static async Task CheckArtworkChangesAsync(MainWindow window, string noArtwork, string untagged,
         string artistOnly, string albumOnly, string covered, FrameworkElement surface, string artifacts)
@@ -397,6 +684,7 @@ internal static class Program
         var closed = false;
         window.Closed += (_, _) => closed = true;
         window.Close();
+        Check(!window.AcceptOpenRequest(null), "a closing window rejects subsequent handoff requests");
         var wasCancelled = false;
         try { await export; }
         catch (OperationCanceledException) { wasCancelled = true; }
@@ -413,7 +701,8 @@ internal static class Program
         var seek = Find<RangeSeekBar>(window, "SeekBar");
         Check(Find<TextBlock>(window, "SongTitle").Text.Contains("Couldn't open") &&
             !string.IsNullOrWhiteSpace(Find<TextBlock>(window, "StatusText").Text) &&
-            !Find<Button>(window, "PlayButton").IsEnabled && !Find<Button>(window, "TrimButton").IsEnabled &&
+            !Find<Button>(window, "PlayButton").IsEnabled && !Find<Button>(window, "StopButton").IsEnabled &&
+            !Find<Button>(window, "TrimButton").IsEnabled &&
             !seek.IsEnabled && seek.Duration == 0 && !seek.IsTrimMode &&
             Find<Button>(window, "SaveButton").Visibility == Visibility.Collapsed, description);
     }
@@ -424,6 +713,13 @@ internal static class Program
     private static Task OpenAsync(MainWindow window, string path)
         => (Task)(typeof(MainWindow).GetMethod("OpenAsync", BindingFlags.Instance | BindingFlags.NonPublic)
             ?.Invoke(window, [path]) ?? throw new Exception("MainWindow.OpenAsync was not found."));
+
+    private static void InvokeWindowMethod(MainWindow window, string name, params object?[] arguments)
+    {
+        var method = typeof(MainWindow).GetMethod(name, BindingFlags.NonPublic | BindingFlags.Instance)
+            ?? throw new Exception("MainWindow method was not found: " + name);
+        method.Invoke(window, arguments);
+    }
 
     private static T ReadField<T>(MainWindow window, string name)
         => (T)(typeof(MainWindow).GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)
@@ -445,9 +741,9 @@ internal static class Program
         surface.UpdateLayout();
     }
 
-    private static void Snapshot(FrameworkElement surface, string path)
+    private static void Snapshot(FrameworkElement surface, string path, bool layout = true)
     {
-        Layout(surface);
+        if (layout) Layout(surface);
         var width = (int)Math.Ceiling(surface.ActualWidth);
         var height = (int)Math.Ceiling(surface.ActualHeight);
         var bitmap = new RenderTargetBitmap(width, height, 96, 96, PixelFormats.Pbgra32);
@@ -463,11 +759,21 @@ internal static class Program
         encoder.Save(file);
     }
 
-    private static async Task WaitUntilAsync(Func<bool> condition, string description)
+    private static string PlaybackState(MainWindow window)
+    {
+        var player = ReadField<AudioPlayerService>(window, "_player");
+        return $"playing={player.IsPlaying}, ended={player.HasEnded}, native={player.Position:F3}, " +
+            $"UI={Find<RangeSeekBar>(window, "SeekBar").Position:F3}, " +
+            $"pending={ReadField<double?>(window, "_pendingSeek")}, stopped={ReadField<double?>(window, "_stoppedPosition")}, " +
+            $"action={AutomationProperties.GetName(Find<Button>(window, "PlayButton"))}";
+    }
+
+    private static async Task WaitUntilAsync(Func<bool> condition, string description, Func<string>? diagnostics = null)
     {
         var elapsed = Stopwatch.StartNew();
         while (!condition() && elapsed.Elapsed < TimeSpan.FromSeconds(8)) await Task.Delay(40);
-        Check(condition(), description);
+        var passed = condition();
+        Check(passed, !passed && diagnostics is not null ? description + " (" + diagnostics() + ")" : description);
     }
 
     private static async Task RunFfmpegAsync(params string[] arguments)
@@ -493,6 +799,7 @@ internal static class Program
     private static void Check(bool condition, string description)
     {
         if (!condition) throw new Exception("FAIL: " + description);
+        _checks++;
         Console.WriteLine("PASS: " + description);
     }
 

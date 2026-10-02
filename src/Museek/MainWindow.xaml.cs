@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -7,6 +8,7 @@ using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
+using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using Microsoft.Win32;
@@ -21,6 +23,7 @@ public partial class MainWindow : Window
     private readonly AlbumArtworkService _artwork = new();
     private readonly DispatcherTimer _timer;
     private readonly string? _initialPath;
+    private readonly AppSettingsService _settings;
     private string? _sourcePath;
     private CancellationTokenSource? _loadCancellation;
     private CancellationTokenSource? _saveCancellation;
@@ -30,14 +33,24 @@ public partial class MainWindow : Window
     private bool _exporting;
     private bool _wantsPlayback;
     private double? _pendingSeek;
+    private double? _stoppedPosition;
     private bool _allowClose;
+    private bool _updatingSettings;
+    private bool _fileDialogOpen;
+    private string? _queuedOpenPath;
     private Task? _activeProbe;
     private Task? _activeExport;
     private Task? _activeArtwork;
 
-    public MainWindow(string? initialPath = null)
+    public event EventHandler? SingleWindowModeChanged;
+    public bool SingleWindowMode => _settings.SingleWindowMode;
+    public void ShowStatus(string message) => StatusText.Text = message;
+
+    public MainWindow(string? initialPath = null, AppSettingsService? settings = null)
     {
+        _settings = settings ?? new AppSettingsService();
         InitializeComponent();
+        RefreshSingleWindowMode();
         _initialPath = initialPath;
         _player = new AudioPlayerService();
         _player.PlaybackError += Player_PlaybackError;
@@ -47,11 +60,88 @@ public partial class MainWindow : Window
         _timer.Start();
     }
 
+    private void Window_SourceInitialized(object? sender, EventArgs e)
+    {
+        var handle = new WindowInteropHelper(this).Handle;
+        SetCaptionAttribute(handle, 20, 1); // Native dark caption buttons.
+        if (!OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000)) return;
+        SetCaptionAttribute(handle, 35, ToColorRef(((SolidColorBrush)Background).Color));
+        SetCaptionAttribute(handle, 36, ToColorRef(((SolidColorBrush)Foreground).Color));
+        SetCaptionAttribute(handle, 34, ToColorRef(Color.FromRgb(0x30, 0x35, 0x2D)));
+    }
+
+    private static int ToColorRef(Color color) => color.R | (color.G << 8) | (color.B << 16);
+
+    private static void SetCaptionAttribute(IntPtr handle, int attribute, int value)
+    {
+        var result = DwmSetWindowAttribute(handle, attribute, ref value, sizeof(int));
+        if (result < 0) Debug.WriteLine($"Caption attribute {attribute} was unavailable: 0x{result:X8}.");
+    }
+
     private async void Window_Loaded(object sender, RoutedEventArgs e)
     {
-        var enabled = 1;
-        DwmSetWindowAttribute(new WindowInteropHelper(this).Handle, 20, ref enabled, sizeof(int));
-        if (!string.IsNullOrWhiteSpace(_initialPath)) await OpenAsync(_initialPath);
+        var path = _queuedOpenPath ?? _initialPath;
+        _queuedOpenPath = null;
+        if (!string.IsNullOrWhiteSpace(path)) await OpenAsync(path);
+    }
+
+    private void Window_Activated(object? sender, EventArgs e) => RefreshSingleWindowMode();
+
+    private void RefreshSingleWindowMode()
+    {
+        var previous = _settings.SingleWindowMode;
+        try { _settings.Reload(); }
+        catch (Exception ex) { StatusText.Text = $"Couldn't read Museek settings: {ex.Message}"; }
+        SetSingleWindowCheck(_settings.SingleWindowMode);
+        if (previous != _settings.SingleWindowMode) SingleWindowModeChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void SetSingleWindowCheck(bool enabled)
+    {
+        _updatingSettings = true;
+        try { SingleWindowModeMenuItem.IsChecked = enabled; }
+        finally { _updatingSettings = false; }
+    }
+
+    private void SingleWindowMode_Changed(object sender, RoutedEventArgs e)
+    {
+        if (_updatingSettings) return;
+        try
+        {
+            _settings.SetSingleWindowMode(SingleWindowModeMenuItem.IsChecked);
+            SingleWindowModeChanged?.Invoke(this, EventArgs.Empty);
+        }
+        catch (Exception ex)
+        {
+            SetSingleWindowCheck(_settings.SingleWindowMode);
+            StatusText.Text = $"Couldn't save Museek settings: {ex.Message}";
+        }
+    }
+
+    // Accept promptly so an Explorer launch can exit before metadata or artwork finishes loading.
+    public bool AcceptOpenRequest(string? path)
+    {
+        if (_closing) return false;
+        if (!string.IsNullOrWhiteSpace(path)) _queuedOpenPath = path;
+        // Return acceptance before any synchronous native playback or settings work begins.
+        Dispatcher.BeginInvoke(DispatcherPriority.Background, () =>
+        {
+            if (_closing) return;
+            if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
+            Activate();
+            if (string.IsNullOrWhiteSpace(path)) return;
+            if (_exporting) StatusText.Text = "The new audio file will open when saving finishes.";
+            if (IsLoaded) OpenQueuedFile();
+        });
+        return true;
+    }
+
+    private void OpenQueuedFile()
+    {
+        if (_closing || _exporting || _fileDialogOpen || _queuedOpenPath is null) return;
+        var path = _queuedOpenPath;
+        _queuedOpenPath = null;
+        _ = OpenAsync(path);
     }
 
     private async Task OpenAsync(string path)
@@ -64,6 +154,7 @@ public partial class MainWindow : Window
         _sourcePath = null;
         _wantsPlayback = false;
         _pendingSeek = null;
+        _stoppedPosition = null;
         _loading = true;
         SetTrimMode(false);
         SeekBar.SetDuration(0);
@@ -132,7 +223,7 @@ public partial class MainWindow : Window
     private void UpdateControls()
     {
         var ready = _sourcePath is not null && !_loading && !_exporting;
-        PlayButton.IsEnabled = SeekBar.IsEnabled = TrimButton.IsEnabled = ready;
+        PlayButton.IsEnabled = StopButton.IsEnabled = SeekBar.IsEnabled = TrimButton.IsEnabled = ready;
         SaveButton.IsEnabled = ready && SeekBar.SelectionEnd > SeekBar.SelectionStart;
         CancelButton.Content = _exporting ? "Stop saving" : "Cancel";
         UpdatePlayIcon();
@@ -150,7 +241,8 @@ public partial class MainWindow : Window
     private void Timer_Tick(object? sender, EventArgs e)
     {
         if (_sourcePath is null || _loading || _exporting || _closing) return;
-        var position = _player.Position;
+        // A stopped VLC player has no seekable clock. Keep the selected cursor until Play.
+        var position = _stoppedPosition ?? _pendingSeek ?? _player.Position;
         // VLC starts asynchronously. Apply a pending preview seek as soon as it is playing.
         if (_pendingSeek is { } pending && _player.IsPlaying)
         {
@@ -159,13 +251,24 @@ public partial class MainWindow : Window
             _pendingSeek = null;
             position = pending;
         }
+        // A seek to EOF can finish before the next timer tick observes native playback.
+        if (_player.HasEnded && _pendingSeek is { } endTarget)
+        {
+            if (endTarget >= SeekBar.Duration - 0.03) _pendingSeek = null;
+            else if (_wantsPlayback)
+            {
+                // Trim bounds may have moved the queued EOF seek back inside the file.
+                try { _player.Play(); }
+                catch (Exception ex) { _pendingSeek = null; _wantsPlayback = false; StatusText.Text = ex.Message; }
+            }
+        }
         if (_trimMode && _wantsPlayback && _pendingSeek is null && position >= SeekBar.SelectionEnd - 0.015)
         {
             _player.Pause();
             _wantsPlayback = false;
             position = SeekBar.SelectionEnd;
         }
-        if (_player.HasEnded && _pendingSeek is null)
+        if (_player.HasEnded && _pendingSeek is null && _stoppedPosition is null)
         {
             _wantsPlayback = false;
             position = _trimMode ? SeekBar.SelectionEnd : SeekBar.Duration;
@@ -182,19 +285,30 @@ public partial class MainWindow : Window
         {
             if (_wantsPlayback)
             {
-                _player.Pause();
+                if (_pendingSeek is { } pending)
+                {
+                    // Pausing before VLC finishes starting must retain the requested cursor.
+                    _player.Stop();
+                    _stoppedPosition = _trimMode ? Math.Clamp(pending, SeekBar.SelectionStart, SeekBar.SelectionEnd) : pending;
+                    SeekBar.Position = _stoppedPosition.Value;
+                    CurrentTime.Text = FormatTime(_stoppedPosition.Value);
+                }
+                else _player.Pause();
                 _wantsPlayback = false;
                 _pendingSeek = null;
             }
             else
             {
+                var stoppedAt = _stoppedPosition;
                 var restartTrim = _trimMode && (_player.HasEnded || SeekBar.Position >= SeekBar.SelectionEnd - 0.03 || SeekBar.Position < SeekBar.SelectionStart);
                 _player.Play();
-                if (restartTrim)
+                if (stoppedAt is not null || restartTrim)
                 {
-                    _player.Seek(SeekBar.SelectionStart);
-                    _pendingSeek = SeekBar.SelectionStart;
+                    var target = restartTrim ? SeekBar.SelectionStart : stoppedAt!.Value;
+                    _player.Seek(target);
+                    _pendingSeek = target;
                 }
+                _stoppedPosition = null;
                 _wantsPlayback = true;
             }
             UpdatePlayIcon();
@@ -226,6 +340,17 @@ public partial class MainWindow : Window
     }
 
     private void PlayButton_Click(object sender, RoutedEventArgs e) => TogglePlayback();
+    private void StopButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (!StopButton.IsEnabled) return;
+        _player.Stop();
+        _wantsPlayback = false;
+        _pendingSeek = null;
+        _stoppedPosition = _trimMode ? SeekBar.SelectionStart : 0;
+        SeekBar.Position = _stoppedPosition.Value;
+        CurrentTime.Text = FormatTime(_stoppedPosition.Value);
+        UpdatePlayIcon();
+    }
     private void VolumeSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
         if (_player is not null) _player.Volume = (int)e.NewValue;
@@ -234,6 +359,12 @@ public partial class MainWindow : Window
     private void SeekBar_SeekRequested(object? sender, double seconds)
     {
         if (_sourcePath is null) return;
+        if (_stoppedPosition is not null)
+        {
+            _stoppedPosition = seconds;
+            CurrentTime.Text = FormatTime(seconds);
+            return;
+        }
         if (_player.HasEnded)
         {
             _player.Play();
@@ -250,6 +381,13 @@ public partial class MainWindow : Window
         UpdateSelectionLabel();
         if (_trimMode && _sourcePath is not null)
         {
+            if (_stoppedPosition is { } stopped)
+            {
+                _stoppedPosition = Math.Clamp(stopped, SeekBar.SelectionStart, SeekBar.SelectionEnd);
+                SeekBar.Position = _stoppedPosition.Value;
+                CurrentTime.Text = FormatTime(_stoppedPosition.Value);
+                return;
+            }
             if (_pendingSeek is { } pending)
                 _pendingSeek = Math.Clamp(pending, SeekBar.SelectionStart, SeekBar.SelectionEnd);
             var position = Math.Clamp(_player.Position, SeekBar.SelectionStart, SeekBar.SelectionEnd);
@@ -275,6 +413,8 @@ public partial class MainWindow : Window
     {
         if (_sourcePath is null || _exporting) return;
         var source = _sourcePath;
+        var start = TimeSpan.FromSeconds(SeekBar.SelectionStart);
+        var end = TimeSpan.FromSeconds(SeekBar.SelectionEnd);
         string[] extensions = [".wav", ".mp3", ".flac", ".m4a", ".ogg", ".opus"];
         var extension = Path.GetExtension(source).ToLowerInvariant();
         var filterIndex = Array.IndexOf(extensions, extension);
@@ -290,9 +430,11 @@ public partial class MainWindow : Window
             OverwritePrompt = true,
             CheckPathExists = true
         };
-        if (dialog.ShowDialog(this) != true) return;
-        var start = TimeSpan.FromSeconds(SeekBar.SelectionStart);
-        var end = TimeSpan.FromSeconds(SeekBar.SelectionEnd);
+        bool? save;
+        _fileDialogOpen = true;
+        try { save = dialog.ShowDialog(this); }
+        finally { _fileDialogOpen = false; }
+        if (save != true) { OpenQueuedFile(); return; }
         _player.Pause();
         _wantsPlayback = false;
         _exporting = true;
@@ -330,6 +472,7 @@ public partial class MainWindow : Window
                 CancelButton.IsEnabled = true;
                 ExportProgress.Visibility = Visibility.Collapsed;
                 UpdateControls();
+                OpenQueuedFile();
             }
         }
     }
@@ -338,13 +481,14 @@ public partial class MainWindow : Window
     {
         var patterns = string.Join(';', WindowsIntegrationService.SupportedExtensions.Select(x => "*" + x));
         var dialog = new OpenFileDialog { Title = "Open audio", Filter = $"Audio files|{patterns}|All files|*.*", CheckFileExists = true };
-        if (dialog.ShowDialog(this) == true) await OpenAsync(dialog.FileName);
-    }
-    private void MenuButton_Click(object sender, RoutedEventArgs e)
-    {
-        var button = (Button)sender;
-        button.ContextMenu.PlacementTarget = button;
-        button.ContextMenu.IsOpen = true;
+        _fileDialogOpen = true;
+        try
+        {
+            var chosen = dialog.ShowDialog(this);
+            _fileDialogOpen = false;
+            if (chosen == true) await OpenAsync(dialog.FileName);
+        }
+        finally { _fileDialogOpen = false; OpenQueuedFile(); }
     }
     private void DefaultApp_Click(object sender, RoutedEventArgs e)
     {
@@ -374,7 +518,7 @@ public partial class MainWindow : Window
         {
             OpenAudioFile(); e.Handled = true;
         }
-        else if (e.Key == Key.Escape && _trimMode)
+        else if (e.Key == Key.Escape && _trimMode && !HelpMenu.IsSubmenuOpen && !ToolsMenu.IsSubmenuOpen && !MenuBar.IsKeyboardFocusWithin)
         {
             CancelButton_Click(CancelButton, new RoutedEventArgs()); e.Handled = true;
         }

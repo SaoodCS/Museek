@@ -69,7 +69,7 @@ try {
         $originalPath = $env:PATH
         try {
             $env:PATH = $FfmpegDirectory + ';' + $originalPath
-            foreach ($check in @('CoreChecks', 'ExportChecks', 'ArtworkChecks', 'UiChecks')) {
+            foreach ($check in @('CoreChecks', 'ExportChecks', 'ArtworkChecks', 'InstanceChecks', 'UiChecks')) {
                 & $DotNetPath run --project (Join-Path $projectRoot "tests\$check") -c Release
                 if ($LASTEXITCODE -ne 0) { throw "$check failed." }
             }

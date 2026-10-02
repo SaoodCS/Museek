@@ -1,13 +1,16 @@
 using System.Diagnostics;
 using System.IO;
 using System.Windows;
+using System.Windows.Threading;
 using Museek.Services;
 
 namespace Museek;
 
 public partial class App : Application
 {
-    protected override void OnStartup(StartupEventArgs e)
+    private SingleWindowService? _singleWindow;
+
+    protected override async void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
         // Registration is explicit, never silently changes the user's defaults.
@@ -29,8 +32,48 @@ public partial class App : Application
 
         try
         {
-            MainWindow = new MainWindow(e.Args.FirstOrDefault());
-            MainWindow.Show();
+            var argument = e.Args.FirstOrDefault();
+            var path = string.IsNullOrWhiteSpace(argument) ? null : Path.GetFullPath(argument);
+            var settings = new AppSettingsService();
+            string? settingsError = null;
+            try { settings.Reload(); }
+            catch (Exception ex) { settingsError = $"Couldn't read Museek settings: {ex.Message}"; }
+            _singleWindow = new SingleWindowService();
+
+            var routingFailed = false;
+            string? routingError = null;
+            try
+            {
+                if (settings.SingleWindowMode)
+                {
+                    // Ownership can outlive pipe startup briefly, or disappear when an owner closes.
+                    var deadline = Stopwatch.StartNew();
+                    while (!_singleWindow.TryAcquire(AcceptOpenRequestAsync))
+                    {
+                        if (await _singleWindow.TryForwardAsync(path, TimeSpan.FromSeconds(2)))
+                        {
+                            Shutdown(0);
+                            return;
+                        }
+                        if (deadline.Elapsed >= TimeSpan.FromSeconds(6)) { routingFailed = true; break; }
+                        await Task.Delay(80);
+                        try { settings.Reload(); }
+                        catch (Exception ex) { settingsError = $"Couldn't read Museek settings: {ex.Message}"; break; }
+                        if (!settings.SingleWindowMode) break;
+                    }
+                }
+            }
+            catch (Exception ex) { routingError = $"Single-window mode is unavailable: {ex.Message}"; }
+
+            var window = new MainWindow(path, settings);
+            MainWindow = window;
+            window.SingleWindowModeChanged += (_, _) => UpdateSingleWindowMode(window.SingleWindowMode);
+            window.Closing += (_, _) => ReleaseSingleWindow();
+            UpdateSingleWindowMode(window.SingleWindowMode);
+            window.Show();
+            if (settingsError is not null) window.ShowStatus(settingsError);
+            else if (routingError is not null) window.ShowStatus(routingError);
+            else if (routingFailed) window.ShowStatus("Opened here because the other Museek window wasn't responding.");
         }
         catch (Exception ex)
         {
@@ -38,5 +81,33 @@ public partial class App : Application
                 "Museek", MessageBoxButton.OK, MessageBoxImage.Error);
             Shutdown(1);
         }
+    }
+
+    private Task<bool> AcceptOpenRequestAsync(string? path, CancellationToken cancellationToken)
+        => Dispatcher.InvokeAsync(() => !cancellationToken.IsCancellationRequested && MainWindow is MainWindow window && window.AcceptOpenRequest(path),
+            DispatcherPriority.Normal, cancellationToken).Task;
+
+    private void UpdateSingleWindowMode(bool enabled)
+    {
+        if (_singleWindow is null) return;
+        try
+        {
+            if (enabled) _singleWindow.TryAcquire(AcceptOpenRequestAsync);
+            else _singleWindow.Release();
+        }
+        catch (Exception ex) { (MainWindow as MainWindow)?.ShowStatus($"Single-window mode is unavailable: {ex.Message}"); }
+    }
+
+    private void ReleaseSingleWindow()
+    {
+        try { _singleWindow?.Release(); }
+        catch (Exception ex) { Debug.WriteLine(ex); }
+    }
+
+    protected override void OnExit(ExitEventArgs e)
+    {
+        try { _singleWindow?.Dispose(); }
+        catch (Exception ex) { Debug.WriteLine(ex); }
+        base.OnExit(e);
     }
 }
