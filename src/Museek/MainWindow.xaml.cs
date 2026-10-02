@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Reflection;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
@@ -519,8 +520,13 @@ public partial class MainWindow : Window
         }
         catch (Exception ex) { StatusText.Text = ex.Message; }
     }
-    private void About_Click(object sender, RoutedEventArgs e) => MessageBox.Show(this,
-        "Museek 1.0\nA simple audio player and trimmer.\n\nPlayback: VLC / LibVLCSharp\nTrimming: FFmpeg\n\nThird-party notices are included beside Museek.exe.", "About Museek", MessageBoxButton.OK, MessageBoxImage.Information);
+    private void About_Click(object sender, RoutedEventArgs e)
+    {
+        var version = typeof(MainWindow).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?
+            .InformationalVersion.Split('+')[0] ?? "Unknown";
+        MessageBox.Show(this,
+            $"Museek {version}\nA simple audio player and trimmer.\n\nPlayback: VLC / LibVLCSharp\nTrimming: FFmpeg\n\nThird-party notices are included beside Museek.exe.", "About Museek", MessageBoxButton.OK, MessageBoxImage.Information);
+    }
     private void Window_DragOver(object sender, DragEventArgs e)
     {
         e.Effects = !_exporting && e.Data.GetDataPresent(DataFormats.FileDrop) ? DragDropEffects.Copy : DragDropEffects.None;
