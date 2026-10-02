@@ -7,6 +7,7 @@ using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
+using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using Microsoft.Win32;
 using Museek.Services;
@@ -17,6 +18,7 @@ public partial class MainWindow : Window
 {
     private readonly AudioPlayerService _player;
     private readonly AudioExportService _export = new();
+    private readonly AlbumArtworkService _artwork = new();
     private readonly DispatcherTimer _timer;
     private readonly string? _initialPath;
     private string? _sourcePath;
@@ -31,6 +33,7 @@ public partial class MainWindow : Window
     private bool _allowClose;
     private Task? _activeProbe;
     private Task? _activeExport;
+    private Task? _activeArtwork;
 
     public MainWindow(string? initialPath = null)
     {
@@ -64,14 +67,18 @@ public partial class MainWindow : Window
         _loading = true;
         SetTrimMode(false);
         SeekBar.SetDuration(0);
+        SetArtwork(null);
+        SetTrackDetails(null, null);
         SongTitle.Text = "Opening audio…";
-        FileSubtitle.Text = Path.GetFileName(path);
         StatusText.Text = "Reading audio…";
         CurrentTime.Text = TotalTime.Text = "0:00";
         UpdateControls();
+        Task<byte[]?>? artwork = null;
         try
         {
             var fullPath = Path.GetFullPath(path);
+            artwork = _artwork.LoadAsync(fullPath, cancellation.Token);
+            _activeArtwork = artwork;
             var probe = _export.ProbeAsync(fullPath, cancellation.Token);
             _activeProbe = probe;
             var info = await probe;
@@ -82,12 +89,16 @@ public partial class MainWindow : Window
             SeekBar.SetDuration(info.Duration.TotalSeconds);
             SongTitle.Text = info.Title;
             SongTitle.ToolTip = info.Title;
-            FileSubtitle.Text = $"{Path.GetFileName(fullPath)}  ·  {info.Format}";
-            FileSubtitle.ToolTip = fullPath;
+            SetTrackDetails(info.Artist, info.Album);
             TotalTime.Text = FormatTime(info.Duration.TotalSeconds);
             Title = $"{info.Title} — Museek";
             StatusText.Text = "Space to pause. Trim to keep your favorite part.";
             _wantsPlayback = true;
+            _loading = false;
+            UpdateControls();
+            var artworkBytes = await artwork;
+            cancellation.Token.ThrowIfCancellationRequested();
+            if (!_closing) SetArtwork(artworkBytes);
         }
         catch (OperationCanceledException) { }
         catch (Exception ex)
@@ -95,17 +106,23 @@ public partial class MainWindow : Window
             if (!cancellation.IsCancellationRequested && !_closing)
             {
                 SongTitle.Text = "Couldn't open this file.";
-                FileSubtitle.Text = "Try another audio file.";
                 StatusText.Text = ex.Message;
                 Title = "Museek";
             }
         }
         finally
         {
+            cancellation.Cancel();
+            if (artwork is not null)
+            {
+                try { await artwork; }
+                catch (OperationCanceledException) { }
+            }
             if (ReferenceEquals(_loadCancellation, cancellation))
             {
                 _loadCancellation = null;
                 _activeProbe = null;
+                _activeArtwork = null;
                 _loading = false;
                 if (!_closing) UpdateControls();
             }
@@ -117,7 +134,6 @@ public partial class MainWindow : Window
         var ready = _sourcePath is not null && !_loading && !_exporting;
         PlayButton.IsEnabled = SeekBar.IsEnabled = TrimButton.IsEnabled = ready;
         SaveButton.IsEnabled = ready && SeekBar.SelectionEnd > SeekBar.SelectionStart;
-        OpenButton.IsEnabled = !_exporting;
         CancelButton.Content = _exporting ? "Stop saving" : "Cancel";
         UpdatePlayIcon();
     }
@@ -192,7 +208,6 @@ public partial class MainWindow : Window
         SeekBar.IsTrimMode = active;
         TrimButton.Visibility = active ? Visibility.Collapsed : Visibility.Visible;
         SaveButton.Visibility = CancelButton.Visibility = SelectionLabel.Visibility = active ? Visibility.Visible : Visibility.Collapsed;
-        ModeLabel.Text = active ? "KEEP THE PART YOU LOVE." : "YOUR AUDIO, SIMPLY.";
         if (active) UpdateSelectionLabel();
     }
 
@@ -319,7 +334,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private async void OpenButton_Click(object sender, RoutedEventArgs e)
+    private async void OpenAudioFile()
     {
         var patterns = string.Join(';', WindowsIntegrationService.SupportedExtensions.Select(x => "*" + x));
         var dialog = new OpenFileDialog { Title = "Open audio", Filter = $"Audio files|{patterns}|All files|*.*", CheckFileExists = true };
@@ -357,7 +372,7 @@ public partial class MainWindow : Window
     {
         if (e.Key == Key.O && Keyboard.Modifiers == ModifierKeys.Control && !_exporting)
         {
-            OpenButton_Click(OpenButton, new RoutedEventArgs()); e.Handled = true;
+            OpenAudioFile(); e.Handled = true;
         }
         else if (e.Key == Key.Escape && _trimMode)
         {
@@ -390,7 +405,7 @@ public partial class MainWindow : Window
         _loadCancellation?.Cancel();
         _saveCancellation?.Cancel();
         // Let FFmpeg finish its cancellation cleanup before ending the process.
-        try { await Task.WhenAll(_activeProbe ?? Task.CompletedTask, _activeExport ?? Task.CompletedTask); }
+        try { await Task.WhenAll(_activeProbe ?? Task.CompletedTask, _activeExport ?? Task.CompletedTask, _activeArtwork ?? Task.CompletedTask); }
         catch (Exception) { /* The load/save handler reports errors while the window is open. */ }
         _player.PlaybackError -= Player_PlaybackError;
         _player.Dispose();
@@ -399,4 +414,43 @@ public partial class MainWindow : Window
     }
     [DllImport("dwmapi.dll")]
     private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
+
+    private void SetArtwork(byte[]? bytes)
+    {
+        BitmapImage? bitmap = null;
+        if (bytes is { Length: > 0 })
+        {
+            try
+            {
+                using var stream = new MemoryStream(bytes, writable: false);
+                bitmap = new BitmapImage();
+                bitmap.BeginInit();
+                bitmap.CacheOption = BitmapCacheOption.OnLoad;
+                bitmap.DecodePixelWidth = 384;
+                bitmap.StreamSource = stream;
+                bitmap.EndInit();
+                bitmap.Freeze();
+            }
+            catch (Exception ex) when (ex is NotSupportedException or IOException or FileFormatException or ArgumentException)
+            {
+                bitmap = null;
+            }
+        }
+        AlbumArtwork.Source = bitmap;
+        AlbumArtwork.Visibility = bitmap is null ? Visibility.Collapsed : Visibility.Visible;
+        ArtworkPlaceholder.Visibility = bitmap is null ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void SetTrackDetails(string? artist, string? album)
+    {
+        ArtistName.Text = artist ?? string.Empty;
+        ArtistName.ToolTip = artist;
+        ArtistName.Visibility = string.IsNullOrWhiteSpace(artist) ? Visibility.Collapsed : Visibility.Visible;
+        AlbumName.Text = album ?? string.Empty;
+        AlbumName.ToolTip = album;
+        AlbumName.Visibility = string.IsNullOrWhiteSpace(album) ? Visibility.Collapsed : Visibility.Visible;
+        var hasDetails = ArtistName.Visibility == Visibility.Visible || AlbumName.Visibility == Visibility.Visible;
+        TrackDetails.Visibility = hasDetails ? Visibility.Visible : Visibility.Collapsed;
+        SongTitle.Margin = new Thickness(0, 0, 0, hasDetails ? 6 : 18);
+    }
 }

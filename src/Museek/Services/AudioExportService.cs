@@ -26,7 +26,7 @@ public sealed class AudioExportService
         cancellationToken.ThrowIfCancellationRequested();
         var result = await RunAsync("ffprobe", [
             "-v", "error", "-select_streams", "a:0", "-show_entries",
-            "stream=codec_name,duration:stream_tags=title:format=duration,format_name:format_tags=title",
+            "stream=codec_name,duration:stream_tags=title,artist,album:format=duration,format_name:format_tags=title,artist,album",
             "-of", "json", source
         ], reader => CaptureAsync(reader, MaximumProbeLength, keepTail: false), cancellationToken)
             .ConfigureAwait(false);
@@ -46,6 +46,8 @@ public sealed class AudioExportService
             var duration = ReadDuration(audio) ?? ReadDuration(format)
                 ?? throw new InvalidDataException("The audio duration could not be determined.");
             var title = ReadTitle(format) ?? ReadTitle(audio) ?? Path.GetFileNameWithoutExtension(source);
+            var artist = ReadMetadataTag(format, "artist") ?? ReadMetadataTag(audio, "artist");
+            var album = ReadMetadataTag(format, "album") ?? ReadMetadataTag(audio, "album");
             var formatName = ReadString(format, "format_name")?.Split(',')[0]
                 ?? ReadString(audio, "codec_name") ?? Path.GetExtension(source).TrimStart('.');
             var extension = Path.GetExtension(source);
@@ -53,7 +55,7 @@ public sealed class AudioExportService
                 (extension.Equals(".m4a", StringComparison.OrdinalIgnoreCase) ||
                  extension.Equals(".m4b", StringComparison.OrdinalIgnoreCase)))
                 formatName = extension.TrimStart('.');
-            return new AudioInfo(duration, title, formatName.ToUpperInvariant());
+            return new AudioInfo(duration, title, formatName.ToUpperInvariant(), artist, album);
         }
         catch (JsonException exception)
         {
@@ -214,6 +216,20 @@ public sealed class AudioExportService
                 var title = tag.Value.GetString();
                 if (!string.IsNullOrWhiteSpace(title)) return title;
             }
+        }
+        return null;
+    }
+
+    private static string? ReadMetadataTag(JsonElement element, string name)
+    {
+        if (element.ValueKind != JsonValueKind.Object || !element.TryGetProperty("tags", out var tags) ||
+            tags.ValueKind != JsonValueKind.Object) return null;
+        foreach (var tag in tags.EnumerateObject())
+        {
+            if (!tag.Name.Equals(name, StringComparison.OrdinalIgnoreCase) ||
+                tag.Value.ValueKind != JsonValueKind.String) continue;
+            var value = tag.Value.GetString()?.Trim();
+            if (!string.IsNullOrEmpty(value)) return value;
         }
         return null;
     }

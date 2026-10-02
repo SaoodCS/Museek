@@ -6,7 +6,9 @@ A small native Windows 11 audio player with precise trimming. Built for **Window
 
 Open `dist\Museek\Museek.exe`. Keep the whole `Museek` folder together; the .NET runtime, VLC and FFmpeg are included.
 
-- **Open file**, drag an audio file into the window, or open a file from Explorer with Museek.
+- Press **Ctrl+O**, drag an audio file into the window, or open a file from Explorer with Museek.
+- Embedded album artwork appears above the song title; files without artwork show a simple placeholder.
+- The artist and album names appear below the title when those tags are available.
 - Play/pause, adjust the volume, and click or drag the seek bar.
 - Click **Trim**, then drag the green start/end handles. Play previews the selected range.
 - **Save copy** opens Save As. Choose WAV, MP3, FLAC, M4A, OGG or Opus. **Cancel** leaves trim mode.
@@ -52,7 +54,7 @@ Install the [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0), th
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Build.ps1
 ```
 
-The script restores the pinned VLC packages, downloads FFmpeg essentials with checksum verification, publishes a self-contained x64 app into `dist\Museek`, and runs the core, audio-export and native UI checks. Supply `-FfmpegDirectory C:\path\to\bin` to use an existing FFmpeg build. Tests also require FFmpeg/FFprobe on PATH; the UI harness uses the bundled tools when available. A local SDK at `.tools\dotnet` is detected automatically.
+The script restores the pinned VLC packages, downloads FFmpeg essentials with checksum verification, publishes a self-contained x64 app into `dist\Museek`, and runs the core, audio-export, artwork and native UI checks. Supply `-FfmpegDirectory C:\path\to\bin` to use an existing FFmpeg build. Tests also require FFmpeg/FFprobe on PATH; the UI harness uses the bundled tools when available. A local SDK at `.tools\dotnet` is detected automatically.
 
 Source lives in `src\Museek`. The small selection model is in `src\Museek.Core`. Test screenshots are written into `artifacts`.
 

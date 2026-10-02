@@ -21,6 +21,9 @@ namespace Museek.UiChecks;
 
 internal static class Program
 {
+    private const string FixtureArtist = "Museek artist — 音楽";
+    private const string FixtureAlbum = "Museek album";
+
     [STAThread]
     private static int Main(string[] args)
     {
@@ -71,8 +74,27 @@ internal static class Program
             // The fixture is silent as well as muted: a regression in volume cannot make noise.
             await RunFfmpegAsync("-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
                 "anullsrc=r=48000:cl=mono", "-t", "12", "-c:a", "pcm_s16le",
-                "-metadata", "title=" + title, "-y", source);
+                "-metadata", "title=" + title, "-metadata", "artist=" + FixtureArtist,
+                "-metadata", "album=" + FixtureAlbum, "-y", source);
             var originalHash = SHA256.HashData(await File.ReadAllBytesAsync(source));
+            var untagged = Path.Combine(fixtureDirectory, "metadata-free audio.wav");
+            await RunFfmpegAsync("-hide_banner", "-loglevel", "error", "-i", source,
+                "-map_metadata", "-1", "-c:a", "copy", "-y", untagged);
+            var artistOnly = Path.Combine(fixtureDirectory, "artist-only audio.wav");
+            await RunFfmpegAsync("-hide_banner", "-loglevel", "error", "-i", untagged,
+                "-c:a", "copy", "-metadata", "artist=Artist only", "-y", artistOnly);
+            var albumOnly = Path.Combine(fixtureDirectory, "album-only audio.wav");
+            await RunFfmpegAsync("-hide_banner", "-loglevel", "error", "-i", untagged,
+                "-c:a", "copy", "-metadata", "album=Album only", "-y", albumOnly);
+            var cover = Path.Combine(fixtureDirectory, "cover image.png");
+            await RunFfmpegAsync("-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                "color=c=0x238fa8:s=64x64:d=1", "-frames:v", "1", "-pix_fmt", "rgb24", "-update", "1", "-y", cover);
+            var covered = Path.Combine(fixtureDirectory, "音楽 embedded cover.mp3");
+            await RunFfmpegAsync("-hide_banner", "-loglevel", "error", "-i", source, "-i", cover,
+                "-map", "0:a:0", "-map", "1:v:0", "-c:a", "libmp3lame", "-q:a", "2", "-c:v", "copy",
+                "-id3v2_version", "3", "-disposition:v:0", "attached_pic", "-metadata", "title=Covered UI fixture",
+                "-metadata", "artist=Covered artist", "-metadata", "album=Covered album",
+                "-metadata:s:v", "title=Album cover", "-metadata:s:v", "comment=Cover (front)", "-y", covered);
 
             window = new MainWindow();
             var volume = Find<Slider>(window, "VolumeSlider");
@@ -86,7 +108,11 @@ internal static class Program
             // Detach the content into an offscreen layout surface. No HWND or desktop capture is used.
             var content = (UIElement)window.Content;
             window.Content = null;
-            var surface = new Border { Child = content, Background = window.Background, Width = 570, Height = 410 };
+            var surface = new Border
+            {
+                Child = content, Background = window.Background,
+                Width = window.Width, Height = Math.Max(1, window.Height - 31)
+            };
             TextElement.SetFontFamily(surface, window.FontFamily);
             TextElement.SetFontSize(surface, window.FontSize);
             TextElement.SetForeground(surface, window.Foreground);
@@ -101,17 +127,26 @@ internal static class Program
             var start = Find<Thumb>(seek, "StartHandle");
             var end = Find<Thumb>(seek, "EndHandle");
             var track = Find<Canvas>(seek, "Surface");
+            Check(window.FindName("OpenButton") is null && window.FindName("FileSubtitle") is null,
+                "the simplified player omits the Open file button and filename subtitle");
+            Check(window.FindName("ModeLabel") is null,
+                "the player omits the mode slogan in both playback and trim layouts");
+            CheckArtworkPlaceholder(window, "an empty player shows the artwork placeholder");
+            CheckSongMetadata(window, null, null, "an empty player collapses the artist and album lines");
             Check(!play.IsEnabled && !trim.IsEnabled && !seek.IsEnabled,
                 "empty player disables playback, seeking, and trimming");
 
             await OpenAsync(window, source);
             Check(Find<TextBlock>(window, "SongTitle").Text == title && window.Title.Contains(title),
                 "opening a Unicode path displays its metadata title");
+            CheckSongMetadata(window, FixtureArtist, FixtureAlbum,
+                "opening tagged audio displays its Unicode artist and album");
+            CheckMetadataLayout(window, surface, "artist and album appear in order below the title");
             Check(Math.Abs(seek.Duration - 12) < 0.01 && Find<TextBlock>(window, "TotalTime").Text == "0:12",
                 "opening audio updates both seek duration and total time");
-            Check(play.IsEnabled && trim.IsEnabled && seek.IsEnabled &&
-                Find<TextBlock>(window, "FileSubtitle").Text.Contains(Path.GetFileName(source)),
-                "loaded audio enables controls and identifies the opened file");
+            Check(play.IsEnabled && trim.IsEnabled && seek.IsEnabled,
+                "loaded audio enables playback, seeking, and trimming");
+            CheckArtworkPlaceholder(window, "audio without embedded artwork keeps the placeholder");
             await WaitUntilAsync(() => player.IsPlaying && player.Position > 0.15,
                 "opening audio autoplays through the native VLC player");
             Check(AutomationProperties.GetName(play) == "Pause", "autoplay exposes the pause action");
@@ -146,6 +181,10 @@ internal static class Program
             Check(start.Visibility == Visibility.Visible && end.Visibility == Visibility.Visible &&
                 Find<TextBlock>(window, "SelectionLabel").Visibility == Visibility.Visible,
                 "trim reveals both boundary thumbs and the selected range");
+            Check(window.FindName("ModeLabel") is null,
+                "entering trim keeps its slogan absent");
+            CheckSongMetadata(window, FixtureArtist, FixtureAlbum,
+                "entering trim preserves the displayed artist and album");
             Drag(start, (track.ActualWidth - 24) / 6);
             Drag(end, -(track.ActualWidth - 24) / 4);
             Check(Math.Abs(seek.SelectionStart - 2) < 0.01 && Math.Abs(seek.SelectionEnd - 9) < 0.01 && save.IsEnabled,
@@ -180,6 +219,8 @@ internal static class Program
                 start.Visibility == Visibility.Collapsed && end.Visibility == Visibility.Collapsed &&
                 Math.Abs(seek.Duration - 12) < 0.01,
                 "Cancel restores normal playback controls and the original duration");
+            CheckSongMetadata(window, FixtureArtist, FixtureAlbum,
+                "cancelling trim preserves the displayed artist and album");
             Click(trim);
             Check(seek.SelectionStart == 0 && Math.Abs(seek.SelectionEnd - 12) < 0.01,
                 "entering trim again resets the selection to the whole original");
@@ -216,12 +257,21 @@ internal static class Program
             await WaitUntilAsync(() => !player.IsPlaying, "pending-seek regression playback can be paused");
             Click(cancel);
 
+            await CheckArtworkChangesAsync(window, source, untagged, artistOnly, albumOnly, covered, surface, artifacts);
             await OpenAsync(window, Path.Combine(fixtureDirectory, "missing audio.wav"));
             CheckErrorState(window, "missing audio shows an error and disables stale playback controls");
+            CheckArtworkPlaceholder(window, "a missing file clears the previous song's artwork");
+            CheckSongMetadata(window, null, null, "a missing file clears the previous artist and album");
             var corrupt = Path.Combine(fixtureDirectory, "壊れた audio.wav");
             await File.WriteAllTextAsync(corrupt, "This is not an audio file.");
+            await OpenAsync(window, covered);
+            await WaitForArtworkAsync(window, "embedded artwork can load again after an error");
+            CheckSongMetadata(window, "Covered artist", "Covered album",
+                "recovering from an error restores the covered song's artist and album");
             await OpenAsync(window, corrupt);
             CheckErrorState(window, "corrupt audio shows an error and disables stale playback controls");
+            CheckArtworkPlaceholder(window, "a corrupt file clears the previous song's artwork");
+            CheckSongMetadata(window, null, null, "a corrupt file clears the previous artist and album");
             var finalSourceBytes = await File.ReadAllBytesAsync(source);
             Check(originalHash.SequenceEqual(SHA256.HashData(finalSourceBytes)),
                 "playback, trimming, cancellation, and errors leave the original file unchanged");
@@ -245,6 +295,76 @@ internal static class Program
                 artifacts, StringComparison.OrdinalIgnoreCase)) Directory.Delete(fixtureDirectory, recursive: true);
         }
     }
+
+    private static async Task CheckArtworkChangesAsync(MainWindow window, string noArtwork, string untagged,
+        string artistOnly, string albumOnly, string covered, FrameworkElement surface, string artifacts)
+    {
+        await OpenAsync(window, covered);
+        await WaitForArtworkAsync(window, "an embedded MP3 cover replaces the artwork placeholder");
+        Check(Find<TextBlock>(window, "SongTitle").Text == "Covered UI fixture",
+            "artwork loading preserves the new song's metadata title");
+        CheckSongMetadata(window, "Covered artist", "Covered album",
+            "artwork loading preserves the covered song's artist and album");
+        CheckMetadataLayout(window, surface, "covered audio places artist and album below its title");
+        Snapshot(surface, Path.Combine(artifacts, "artwork.png"));
+
+        var changing = OpenAsync(window, noArtwork);
+        CheckArtworkPlaceholder(window, "changing files immediately clears the previous artwork");
+        CheckSongMetadata(window, null, null, "changing files immediately clears the previous artist and album");
+        await changing;
+        CheckArtworkPlaceholder(window, "changing to a song without artwork retains its placeholder");
+        CheckSongMetadata(window, FixtureArtist, FixtureAlbum,
+            "changing audio replaces the artist and album with the new song's metadata");
+
+        var clearing = OpenAsync(window, untagged);
+        CheckSongMetadata(window, null, null, "opening metadata-free audio immediately clears stale names");
+        await clearing;
+        CheckSongMetadata(window, null, null, "audio without artist or album keeps both lines empty and collapsed");
+        await OpenAsync(window, artistOnly);
+        CheckSongMetadata(window, "Artist only", null, "artist-only audio displays its artist and collapses the album line");
+        await OpenAsync(window, albumOnly);
+        CheckSongMetadata(window, null, "Album only", "album-only audio displays its album and collapses the artist line");
+
+        // Leave real artwork loaded so the subsequent file-error checks can catch stale covers.
+        await OpenAsync(window, covered);
+        await WaitForArtworkAsync(window, "returning to a covered song restores its embedded artwork");
+        CheckSongMetadata(window, "Covered artist", "Covered album",
+            "returning to covered audio restores its artist and album");
+    }
+
+    private static void CheckSongMetadata(MainWindow window, string? artist, string? album, string description)
+    {
+        var artistLine = Find<TextBlock>(window, "ArtistName");
+        var albumLine = Find<TextBlock>(window, "AlbumName");
+        Check(artistLine.Text == (artist ?? "") && artistLine.Visibility == (artist is null ? Visibility.Collapsed : Visibility.Visible) &&
+            albumLine.Text == (album ?? "") && albumLine.Visibility == (album is null ? Visibility.Collapsed : Visibility.Visible), description);
+    }
+
+    private static void CheckMetadataLayout(MainWindow window, FrameworkElement surface, string description)
+    {
+        Layout(surface);
+        var title = Find<TextBlock>(window, "SongTitle");
+        var artist = Find<TextBlock>(window, "ArtistName");
+        var album = Find<TextBlock>(window, "AlbumName");
+        var play = Find<Button>(window, "PlayButton");
+        var titleBottom = title.TranslatePoint(new Point(0, title.ActualHeight), surface).Y;
+        var artistTop = artist.TranslatePoint(new Point(), surface).Y;
+        var artistBottom = artist.TranslatePoint(new Point(0, artist.ActualHeight), surface).Y;
+        var albumTop = album.TranslatePoint(new Point(), surface).Y;
+        var albumBottom = album.TranslatePoint(new Point(0, album.ActualHeight), surface).Y;
+        var playTop = play.TranslatePoint(new Point(), surface).Y;
+        Check(artist.ActualHeight > 0 && album.ActualHeight > 0 && artistTop >= titleBottom - 0.1 &&
+            albumTop >= artistBottom - 0.1 && albumBottom <= playTop + 0.1, description);
+    }
+
+    private static Task WaitForArtworkAsync(MainWindow window, string description)
+        => WaitUntilAsync(() => Find<Image>(window, "AlbumArtwork") is
+                { Visibility: Visibility.Visible, Source: BitmapSource { PixelWidth: > 0, PixelHeight: > 0 } } &&
+            Find<Border>(window, "ArtworkPlaceholder").Visibility == Visibility.Collapsed, description);
+
+    private static void CheckArtworkPlaceholder(MainWindow window, string description)
+        => Check(Find<Image>(window, "AlbumArtwork") is { Visibility: Visibility.Collapsed, Source: null } &&
+            Find<Border>(window, "ArtworkPlaceholder").Visibility == Visibility.Visible, description);
 
     private static async Task CheckCloseDuringExportAsync(MainWindow window, string fixtureDirectory)
     {
@@ -320,18 +440,20 @@ internal static class Program
 
     private static void Layout(FrameworkElement surface)
     {
-        surface.Measure(new Size(570, 410));
-        surface.Arrange(new Rect(0, 0, 570, 410));
+        surface.Measure(new Size(surface.Width, surface.Height));
+        surface.Arrange(new Rect(0, 0, surface.Width, surface.Height));
         surface.UpdateLayout();
     }
 
     private static void Snapshot(FrameworkElement surface, string path)
     {
         Layout(surface);
-        var bitmap = new RenderTargetBitmap(570, 410, 96, 96, PixelFormats.Pbgra32);
+        var width = (int)Math.Ceiling(surface.ActualWidth);
+        var height = (int)Math.Ceiling(surface.ActualHeight);
+        var bitmap = new RenderTargetBitmap(width, height, 96, 96, PixelFormats.Pbgra32);
         bitmap.Render(surface);
-        var pixels = new byte[570 * 410 * 4];
-        bitmap.CopyPixels(pixels, 570 * 4, 0);
+        var pixels = new byte[width * height * 4];
+        bitmap.CopyPixels(pixels, width * 4, 0);
         var colors = new HashSet<int>();
         for (var offset = 0; offset < pixels.Length; offset += 4) colors.Add(BitConverter.ToInt32(pixels, offset));
         Check(colors.Count > 16, Path.GetFileName(path) + " renders real controls and text");

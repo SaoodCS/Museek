@@ -12,18 +12,60 @@ try
     var source = Path.Combine(folder, "音楽 sample ' & source.wav");
     await RunToolAsync("ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
         "aevalsrc=if(lt(t\\,1)\\,0.25\\,if(lt(t\\,3)\\,-0.5\\,0.75)):s=48000:d=5", "-c:a", "pcm_s16le",
-        "-metadata", "title=Metadata title", "-y", source);
+        "-metadata", "title=Metadata title", "-metadata", "artist=  Metadata artist  ",
+        "-metadata", "album=  Metadata album  ", "-y", source);
     var sourceHash = await HashAsync(source);
     var service = new AudioExportService();
     var info = await service.ProbeAsync(source);
     Check(Math.Abs(info.Duration.TotalSeconds - 5) < 0.01, "probe reads duration");
     Check(info.Title == "Metadata title", "probe reads metadata title");
+    Check(info.Artist == "Metadata artist" && info.Album == "Metadata album", "probe reads and trims global artist and album");
     Check(!string.IsNullOrWhiteSpace(info.Format), "probe identifies format");
 
     var noTitle = Path.Combine(folder, "Filename title.wav");
     await RunToolAsync("ffmpeg", "-hide_banner", "-loglevel", "error", "-i", source,
         "-map_metadata", "-1", "-c:a", "copy", "-y", noTitle);
-    Check((await service.ProbeAsync(noTitle)).Title == "Filename title", "probe falls back to filename");
+    var untaggedInfo = await service.ProbeAsync(noTitle);
+    Check(untaggedInfo.Title == "Filename title", "probe falls back to filename");
+    Check(untaggedInfo.Artist is null && untaggedInfo.Album is null, "missing artist and album remain null");
+
+    var uppercaseOgg = Path.Combine(folder, "uppercase stream tags.ogg");
+    await RunToolAsync("ffmpeg", "-hide_banner", "-loglevel", "error", "-i", noTitle,
+        "-map_metadata", "-1", "-c:a", "libvorbis", "-metadata:s:a:0", "ARTIST=  Stream Årtist  ",
+        "-metadata:s:a:0", "AlBuM=  Stream Álbum  ", "-metadata:s:a:0", "TITLE=  Padded title  ", "-y", uppercaseOgg);
+    var streamInfo = await service.ProbeAsync(uppercaseOgg);
+    Check(streamInfo.Artist == "Stream Årtist" && streamInfo.Album == "Stream Álbum",
+        "probe reads case-insensitive OGG stream tags and trims Unicode values");
+    Check(streamInfo.Title == "  Padded title  ", "existing title whitespace behavior is preserved");
+
+    foreach (var fixture in new[]
+    {
+        (Name: "global preference", GlobalArtist: "  Global artist  ", GlobalAlbum: "  Global album  ",
+            ExpectedArtist: "Global artist", ExpectedAlbum: "Global album"),
+        (Name: "blank global artist", GlobalArtist: "   ", GlobalAlbum: "  Global album  ",
+            ExpectedArtist: "Stream artist", ExpectedAlbum: "Global album"),
+        (Name: "blank global album", GlobalArtist: "  Global artist  ", GlobalAlbum: "   ",
+            ExpectedArtist: "Global artist", ExpectedAlbum: "Stream album")
+    })
+    {
+        var tagged = Path.Combine(folder, fixture.Name + ".mka");
+        await RunToolAsync("ffmpeg", "-hide_banner", "-loglevel", "error", "-i", noTitle,
+            "-map_metadata", "-1", "-c:a", "flac", "-metadata", "ArTiSt=" + fixture.GlobalArtist,
+            "-metadata", "ALBUM=" + fixture.GlobalAlbum, "-metadata:s:a:0", "ARTIST=  Stream artist  ",
+            "-metadata:s:a:0", "album=  Stream album  ", "-y", tagged);
+        var taggedInfo = await service.ProbeAsync(tagged);
+        Check(taggedInfo.Artist == fixture.ExpectedArtist && taggedInfo.Album == fixture.ExpectedAlbum,
+            "probe handles " + fixture.Name + " independently for artist and album");
+    }
+
+    var laterTags = Path.Combine(folder, "later audio and video tags.mkv");
+    await RunToolAsync("ffmpeg", "-hide_banner", "-loglevel", "error", "-i", noTitle, "-i", noTitle,
+        "-f", "lavfi", "-i", "color=size=32x32:rate=1:duration=5", "-map", "0:a:0", "-map", "1:a:0",
+        "-map", "2:v:0", "-c:a", "flac", "-c:v", "ffv1", "-map_metadata", "-1",
+        "-metadata:s:a:1", "ARTIST=Later artist", "-metadata:s:a:1", "ALBUM=Later album",
+        "-metadata:s:v:0", "ARTIST=Video artist", "-metadata:s:v:0", "ALBUM=Video album", "-y", laterTags);
+    var firstStreamInfo = await service.ProbeAsync(laterTags);
+    Check(firstStreamInfo.Artist is null && firstStreamInfo.Album is null, "artist and album ignore later audio and video streams");
 
     var video = Path.Combine(folder, "video.mp4");
     await RunToolAsync("ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
@@ -41,7 +83,9 @@ try
     var samples = await File.ReadAllBytesAsync(raw);
     Check(samples.Length > 0 && BitConverter.ToInt16(samples, 0) == -16384 &&
         BitConverter.ToInt16(samples, samples.Length - 2) == -16384, "trim contains only selected audio");
-    Check((await service.ProbeAsync(output)).Title == "Metadata title", "export preserves metadata");
+    var outputInfo = await service.ProbeAsync(output);
+    Check(outputInfo.Title == "Metadata title", "export preserves metadata");
+    Check(outputInfo.Artist == "Metadata artist" && outputInfo.Album == "Metadata album", "WAV export retains artist and album");
     Check(reports.Count > 0 && reports[^1] == 1 && reports.All(value => value >= 0 && value <= 1),
         "export reports bounded progress through completion");
     var sourceHashAfterExport = await HashAsync(source);
@@ -54,12 +98,17 @@ try
         var encodedInfo = await service.ProbeAsync(encoded);
         Check(Math.Abs(encodedInfo.Duration.TotalSeconds - 1) < 0.15, extension + " exports the selected duration");
         Check(encodedInfo.Title == "Metadata title", extension + " keeps the title");
+        Check(encodedInfo.Artist == "Metadata artist" && encodedInfo.Album == "Metadata album",
+            extension + " keeps artist and album");
         if (extension == ".m4a") Check(encodedInfo.Format == "M4A", "M4A probe displays its audio container name");
     }
 
     var oggToMp3 = Path.Combine(folder, "stream metadata.mp3");
     await service.ExportAsync(Path.Combine(folder, "trim.ogg"), oggToMp3, TimeSpan.Zero, TimeSpan.FromSeconds(0.5));
-    Check((await service.ProbeAsync(oggToMp3)).Title == "Metadata title", "stream metadata survives export to a global-tag container");
+    var oggExportInfo = await service.ProbeAsync(oggToMp3);
+    Check(oggExportInfo.Title == "Metadata title", "stream metadata survives export to a global-tag container");
+    Check(oggExportInfo.Artist == "Metadata artist" && oggExportInfo.Album == "Metadata album",
+        "stream artist and album survive export to a global-tag container");
 
     var multi = Path.Combine(folder, "multiple streams.mkv");
     await RunToolAsync("ffmpeg", "-hide_banner", "-loglevel", "error", "-i", source, "-f", "lavfi", "-i",
