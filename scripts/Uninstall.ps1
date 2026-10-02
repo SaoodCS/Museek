@@ -78,6 +78,32 @@ namespace Museek {
 }
 
 $registry = [Microsoft.Win32.Registry]::CurrentUser
+
+# The optional tag verb has its own owner marker: it may exist without default-app registration.
+# Preserve another Museek copy's verb and every neighboring application key.
+$systemAssociations = $registry.OpenSubKey('Software\Classes\SystemFileAssociations', $true)
+if ($systemAssociations) {
+    try {
+        foreach ($extension in $systemAssociations.GetSubKeyNames()) {
+            if (-not $extension.StartsWith('.')) { continue }
+            $verbPath = $extension + '\shell\Museek.EditTags'
+            $verb = $systemAssociations.OpenSubKey($verbPath)
+            try {
+                $ownsVerb = $verb -and $verb.GetValue('MuseekOwner') -eq 'Museek.EditTags.v1' -and
+                    (Test-SamePath $verb.GetValue('MuseekExecutable') $executable)
+            } finally { if ($verb) { $verb.Dispose() } }
+            if ($ownsVerb) { $systemAssociations.DeleteSubKeyTree($verbPath, $false) }
+        }
+    } finally { $systemAssociations.Dispose() }
+}
+$tagClassPath = 'Software\Classes\CLSID\{5A7C0D7E-9755-4F2E-ABC2-793EE90650BC}'
+$tagClass = $registry.OpenSubKey($tagClassPath)
+try {
+    $ownsTagClass = $tagClass -and $tagClass.GetValue('MuseekOwner') -eq 'Museek.EditTags.v1' -and
+        (Test-SamePath $tagClass.GetValue('MuseekExecutable') $executable)
+} finally { if ($tagClass) { $tagClass.Dispose() } }
+if ($ownsTagClass) { $registry.DeleteSubKeyTree($tagClassPath, $false) }
+
 $expectedCommand = '"' + $executable + '" "%1"'
 $appKey = $registry.OpenSubKey('Software\Museek')
 try { $ownsRegistration = $appKey -and (Test-SamePath $appKey.GetValue('ExecutablePath') $executable) }

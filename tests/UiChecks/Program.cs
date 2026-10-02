@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.IO;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Windows;
 using System.Windows.Automation;
@@ -15,8 +16,10 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using System.Xml.Linq;
+using Microsoft.Win32;
 using Museek;
 using Museek.Controls;
+using Museek.Models;
 using Museek.Services;
 
 namespace Museek.UiChecks;
@@ -101,7 +104,9 @@ internal static class Program
 
             var settingsPath = Path.Combine(fixtureDirectory, "isolated settings.json");
             var settings = new AppSettingsService(settingsPath);
-            window = new MainWindow(initialPath: untagged, settings: settings);
+            var contextMenuRegistration = new List<bool>();
+            window = new MainWindow(initialPath: untagged, settings: settings,
+                editTagsContextMenuRegistration: enabled => contextMenuRegistration.Add(enabled));
             var volume = Find<Slider>(window, "VolumeSlider");
             volume.Value = 0;
             var player = (AudioPlayerService)(typeof(MainWindow).GetField("_player",
@@ -141,7 +146,10 @@ internal static class Program
             CheckSongMetadata(window, null, null, "an empty player collapses the artist and album lines");
             Check(!play.IsEnabled && !stop.IsEnabled && !trim.IsEnabled && !seek.IsEnabled,
                 "empty player disables playback, Stop, seeking, and trimming");
-            CheckMenus(window, surface, artifacts, settings, settingsPath);
+            CheckMenus(window, surface, artifacts, settings, settingsPath, contextMenuRegistration);
+            CheckContextMenuRegistration(fixtureDirectory);
+            CheckContextMenuSelection(source, covered);
+            await CheckTagEditorAsync(source, covered, fixtureDirectory, artifacts);
 
             Check(window.AcceptOpenRequest(covered) && window.AcceptOpenRequest(source) &&
                 ReadField<string?>(window, "_queuedOpenPath") == source && ReadField<string?>(window, "_sourcePath") is null,
@@ -446,7 +454,7 @@ internal static class Program
     }
 
     private static void CheckMenus(MainWindow window, FrameworkElement surface, string artifacts,
-        AppSettingsService settings, string settingsPath)
+        AppSettingsService settings, string settingsPath, List<bool> contextMenuRegistration)
     {
         var menu = Find<Menu>(window, "MenuBar");
         var tools = Find<MenuItem>(window, "ToolsMenu");
@@ -454,13 +462,15 @@ internal static class Program
         var toolsEntries = tools.Items.OfType<MenuItem>().ToArray();
         var helpEntries = help.Items.OfType<MenuItem>().ToArray();
         var singleWindow = Find<MenuItem>(window, "SingleWindowModeMenuItem");
+        var editTags = Find<MenuItem>(window, "EditTagsContextMenuItem");
         Check(menu.Items.Count == 2 && ReferenceEquals(menu.Items[0], tools) &&
             ReferenceEquals(menu.Items[1], help) &&
             (tools.Header?.ToString() ?? "").Replace("_", "") == "Tools" &&
-            toolsEntries.Length == 2 && toolsEntries[0].Header?.ToString() == "Choose Museek as default…" &&
+            toolsEntries.Length == 3 && toolsEntries[0].Header?.ToString() == "Choose Museek as default…" &&
             ReferenceEquals(toolsEntries[1], singleWindow) && singleWindow.IsCheckable &&
-            singleWindow.Header?.ToString() == "Single-window mode",
-            "Tools contains Default Apps and the checkable Single-window mode setting");
+            singleWindow.Header?.ToString() == "Single-window mode" && ReferenceEquals(toolsEntries[2], editTags) &&
+            editTags.IsCheckable && editTags.Header?.ToString() == "'Edit Tags' context menu",
+            "Tools contains Default Apps and checkable Single-window and Edit Tags settings");
         Check((help.Header?.ToString() ?? "").Replace("_", "") == "Help" && helpEntries.Length == 1 &&
             helpEntries[0].Header?.ToString() == "About Museek",
             "Help contains only About Museek");
@@ -501,6 +511,25 @@ internal static class Program
         Check(!singleWindow.IsChecked && !window.SingleWindowMode && !ReadSingleWindowMode(settingsPath) &&
             changes == 2 && glyph.Visibility != Visibility.Visible,
             "toggling the menu off persists disabled mode and removes its checkmark");
+        var tagGlyph = editTags.Template.FindName("CheckGlyph", editTags) as System.Windows.Shapes.Path
+            ?? throw new Exception("Edit Tags mode's visible checkmark was not found.");
+        Check(!settings.EditTagsContextMenu && !editTags.IsChecked && tagGlyph.Visibility != Visibility.Visible,
+            "a fresh isolated settings file initializes Edit Tags context menu unchecked");
+        var tagToggle = new MenuItemAutomationPeer(editTags).GetPattern(PatternInterface.Toggle) as IToggleProvider
+            ?? throw new Exception("Edit Tags context menu's WPF toggle provider was not found.");
+        tagToggle.Toggle();
+        toolsBody = LayoutClosedMenu(tools);
+        var reloaded = new AppSettingsService(settingsPath);
+        reloaded.Reload();
+        Check(editTags.IsChecked && reloaded.EditTagsContextMenu && !reloaded.SingleWindowMode &&
+            contextMenuRegistration.SequenceEqual([true]) && tagGlyph.Visibility == Visibility.Visible && HasRenderedInk(tagGlyph),
+            "enabling Edit Tags persists its setting, calls registration once, and renders a tick");
+        Snapshot(toolsBody, Path.Combine(artifacts, "tools-edit-tags-checked.png"), layout: false);
+        tagToggle.Toggle();
+        reloaded.Reload();
+        Check(!editTags.IsChecked && !reloaded.EditTagsContextMenu && contextMenuRegistration.SequenceEqual([true, false]) &&
+            tagGlyph.Visibility != Visibility.Visible,
+            "disabling Edit Tags unregisters its context action and removes the persisted tick");
         Check(!tools.IsSubmenuOpen && !help.IsSubmenuOpen && new WindowInteropHelper(window).Handle == IntPtr.Zero,
             "menu toggles and renders create no native popup or player window");
     }
@@ -543,6 +572,254 @@ internal static class Program
             "file picker cleanup opens and clears its latest queued request");
         CheckSongMetadata(window, null, null, "a queued untagged song clears the replaced song's metadata");
     }
+
+    private static void CheckContextMenuRegistration(string fixtureDirectory)
+    {
+        var registryPath = @"Software\Museek\Tests\TagMenu-" + Guid.NewGuid().ToString("N");
+        var executable = Path.Combine(fixtureDirectory, "Museek.exe");
+        File.WriteAllBytes(executable, [0]);
+        try
+        {
+            using var isolatedRoot = Registry.CurrentUser.CreateSubKey(registryPath);
+            using (var unrelated = isolatedRoot.CreateSubKey(@"Software\Classes\SystemFileAssociations\.mp3\shell\Unrelated.Test"))
+                unrelated.SetValue("", "Preserve this unrelated command");
+            Check(!TagContextMenuService.IsRegistered(executable, isolatedRoot),
+                "a fresh isolated registry contains no Edit Tags action");
+            TagContextMenuService.Register(executable, isolatedRoot);
+            Check(TagContextMenuService.IsRegistered(executable, isolatedRoot),
+                "registering Edit Tags is detectable under the isolated registry");
+            foreach (var extension in WindowsIntegrationService.SupportedExtensions)
+            {
+                using var verb = isolatedRoot.OpenSubKey($@"Software\Classes\SystemFileAssociations\{extension}\shell\Museek.EditTags");
+                using var command = verb?.OpenSubKey("command");
+                Check(verb?.GetValue("")?.ToString() == "Edit Tags" &&
+                    command?.GetValue("DelegateExecute")?.ToString()?.Equals(TagContextMenuService.CommandClassId.ToString("B"),
+                        StringComparison.OrdinalIgnoreCase) == true,
+                    extension + " has an Edit Tags command delegated to the full-selection handler");
+            }
+            using (var wildcard = isolatedRoot.OpenSubKey(@"Software\Classes\*\shell\Museek.EditTags"))
+                Check(wildcard is null, "Edit Tags registration does not add an all-files wildcard command");
+            TagContextMenuService.Register(executable, isolatedRoot);
+            TagContextMenuService.Unregister(executable, isolatedRoot);
+            Check(!TagContextMenuService.IsRegistered(executable, isolatedRoot),
+                "idempotent isolated registration can be fully removed");
+            using var retained = isolatedRoot.OpenSubKey(@"Software\Classes\SystemFileAssociations\.mp3\shell\Unrelated.Test");
+            Check(retained?.GetValue("")?.ToString() == "Preserve this unrelated command",
+                "removing Museek's context action preserves unrelated Explorer commands");
+        }
+        finally
+        {
+            // Exactly this random test namespace is removed. Production Classes keys are never written.
+            Registry.CurrentUser.DeleteSubKeyTree(registryPath, throwOnMissingSubKey: false);
+        }
+    }
+
+    private static async Task CheckTagEditorAsync(string source, string covered, string fixtureDirectory, string artifacts)
+    {
+        var first = Path.Combine(fixtureDirectory, "editor first.wav");
+        var second = Path.Combine(fixtureDirectory, "editor second.mp3");
+        File.Copy(source, first);
+        File.Copy(covered, second);
+        var service = new AudioTagService();
+        var beforeFirst = await service.ReadAsync(first);
+        var beforeSecond = await service.ReadAsync(second);
+        var editor = new TagEditorWindow([first, second]);
+        try
+        {
+            await editor.LoadAsync();
+            Check(!editor.IsVisible && new WindowInteropHelper(editor).Handle == IntPtr.Zero,
+                "loading the tag editor for a batch creates no native window");
+            var fieldNames = new[] { "Title", "Artist", "Album", "AlbumArtist", "Genre", "Year", "TrackNumber", "DiscNumber", "Comment" };
+            Check(fieldNames.All(name => !Find<CheckBox>(editor, name + "Apply").IsChecked.GetValueOrDefault()) &&
+                Find<Button>(editor, "SaveTagsButton").IsEnabled,
+                "batch editing starts with every field unselected so mixed file values are preserved");
+            var keep = editor.BuildPatch();
+            Check(keep.Title is null && keep.Artist is null && keep.Album is null && keep.AlbumArtist is null &&
+                keep.Genre is null && keep.Year is null && keep.TrackNumber is null && keep.DiscNumber is null &&
+                keep.Comment is null && keep.ArtworkAction == ArtworkAction.Keep,
+                "an untouched editor builds an empty patch that keeps all tags and artwork");
+            Find<CheckBox>(editor, "GenreApply").IsChecked = true;
+            Find<TextBox>(editor, "GenreValue").Text = "Editor batch genre 音楽";
+            Find<CheckBox>(editor, "YearApply").IsChecked = true;
+            Find<TextBox>(editor, "YearValue").Text = "2026";
+            Find<TextBox>(editor, "ArtistValue").Text = "Typed but unchecked";
+            Find<CheckBox>(editor, "ArtistApply").IsChecked = false;
+            var patch = editor.BuildPatch();
+            Check(patch.Genre == "Editor batch genre 音楽" && patch.Year == 2026 && patch.Title is null &&
+                patch.Artist is null && patch.Album is null && patch.ArtworkAction == ArtworkAction.Keep,
+                "the editor builds a patch from only checked fields");
+            Find<TextBox>(editor, "YearValue").Text = "not a year";
+            var invalidRejected = false;
+            try { editor.BuildPatch(); }
+            catch (ArgumentException) { invalidRejected = true; }
+            catch (FormatException) { invalidRejected = true; }
+            catch (InvalidDataException) { invalidRejected = true; }
+            Check(invalidRejected, "checked numeric fields reject invalid input before saving");
+            Find<TextBox>(editor, "YearValue").Text = "10000";
+            var excessiveYearRejected = false;
+            try { editor.BuildPatch(); }
+            catch (ArgumentException) { excessiveYearRejected = true; }
+            Check(excessiveYearRejected, "the editor rejects a year above 9999 before saving");
+            Find<TextBox>(editor, "YearValue").Text = "2026";
+
+            var content = (UIElement)editor.Content;
+            editor.Content = null;
+            var surface = new Border { Child = content, Background = editor.Background, Resources = editor.Resources,
+                Width = editor.Width, Height = Math.Max(1, editor.Height - 31) };
+            TextElement.SetFontFamily(surface, editor.FontFamily);
+            TextElement.SetFontSize(surface, editor.FontSize);
+            TextElement.SetForeground(surface, editor.Foreground);
+            Layout(surface);
+            Check(Find<FrameworkElement>(editor, "FieldsPanel").ActualHeight > 0 &&
+                Find<FrameworkElement>(editor, "FilesList").ActualHeight > 0 &&
+                Find<Button>(editor, "SaveTagsButton").ActualWidth > 40,
+                "tag editor renders its selected-file list, tag fields, and save controls");
+            Snapshot(surface, Path.Combine(artifacts, "edit-tags-batch.png"));
+            await editor.SaveAsync();
+            var afterFirst = await service.ReadAsync(first);
+            var afterSecond = await service.ReadAsync(second);
+            Check(afterFirst.Genre == patch.Genre && afterSecond.Genre == patch.Genre &&
+                afterFirst.Year == 2026 && afterSecond.Year == 2026 &&
+                afterFirst.Title == beforeFirst.Title && afterSecond.Title == beforeSecond.Title &&
+                afterFirst.Artist == beforeFirst.Artist && afterSecond.Artist == beforeSecond.Artist &&
+                afterFirst.Album == beforeFirst.Album && afterSecond.Album == beforeSecond.Album,
+                "saving a batch updates selected fields while preserving each file's different title, artist, and album");
+            Check(afterSecond.ArtworkBytes?.SequenceEqual(beforeSecond.ArtworkBytes ?? []) == true &&
+                afterFirst.ArtworkBytes is null && !editor.IsVisible && new WindowInteropHelper(editor).Handle == IntPtr.Zero,
+                "batch saving keeps per-file artwork and stays offscreen");
+            Click(Find<Button>(editor, "RemoveArtworkButton"));
+            Check(editor.BuildPatch().ArtworkAction == ArtworkAction.Remove &&
+                Find<Image>(editor, "ArtworkImage").Source is null,
+                "the editor Remove action requests removal and updates its artwork preview");
+            Click(Find<Button>(editor, "KeepArtworkButton"));
+            Check(editor.BuildPatch().ArtworkAction == ArtworkAction.Keep,
+                "Keep original artwork cancels an unsaved removal request");
+            Click(Find<Button>(editor, "RemoveArtworkButton"));
+            await editor.SaveAsync();
+            Check((await service.ReadAsync(first)).ArtworkBytes is null && (await service.ReadAsync(second)).ArtworkBytes is null,
+                "saving the editor's Remove action clears artwork from the selected batch");
+            var selectedArtwork = await File.ReadAllBytesAsync(Path.Combine(fixtureDirectory, "cover image.png"));
+            editor.SetArtwork(selectedArtwork);
+            var artworkPatch = editor.BuildPatch();
+            Check(artworkPatch.ArtworkAction == ArtworkAction.Replace &&
+                artworkPatch.ArtworkBytes?.SequenceEqual(selectedArtwork) == true &&
+                Find<Image>(editor, "ArtworkImage").Source is BitmapSource { PixelWidth: > 0 },
+                "choosing new artwork previews it and builds an artwork-only replacement patch");
+            Snapshot(surface, Path.Combine(artifacts, "edit-tags-artwork.png"));
+            await editor.SaveAsync();
+            Check((await service.ReadAsync(first)).ArtworkBytes?.SequenceEqual(selectedArtwork) == true &&
+                (await service.ReadAsync(second)).ArtworkBytes?.SequenceEqual(selectedArtwork) == true &&
+                (await service.ReadAsync(second)).Title == beforeSecond.Title,
+                "saving artwork through the editor embeds it in every selected file and keeps their tags");
+        }
+        finally { editor.Close(); }
+
+        var single = new TagEditorWindow([second]);
+        try
+        {
+            await single.LoadAsync();
+            Check(Find<TextBox>(single, "TitleValue").Text == beforeSecond.Title &&
+                Find<TextBox>(single, "ArtistValue").Text == beforeSecond.Artist &&
+                Find<TextBox>(single, "AlbumValue").Text == beforeSecond.Album,
+                "a single-file editor preloads its actual title, artist, and album");
+            Check(Find<Image>(single, "ArtworkImage").Source is BitmapSource { PixelWidth: > 0 },
+                "the single-file editor previews its embedded album artwork");
+            Find<CheckBox>(single, "TitleApply").IsChecked = true;
+            Find<TextBox>(single, "TitleValue").Text = "";
+            Find<CheckBox>(single, "TrackNumberApply").IsChecked = true;
+            Find<TextBox>(single, "TrackNumberValue").Text = "";
+            var clear = single.BuildPatch();
+            Check(clear.Title == "" && clear.TrackNumber == 0 && clear.Artist is null && clear.ArtworkAction == ArtworkAction.Keep,
+                "checked blank text and number fields request clearing while unchecked values remain untouched");
+            var cancelHash = SHA256.HashData(await File.ReadAllBytesAsync(second));
+            Click(Find<Button>(single, "CancelTagsButton"));
+            Check(SHA256.HashData(await File.ReadAllBytesAsync(second)).SequenceEqual(cancelHash),
+                "cancelling unsaved tag edits preserves the audio file byte-for-byte");
+        }
+        finally { single.Close(); }
+        await CheckTagEditorCloseDuringLoadAsync(first, fixtureDirectory);
+    }
+
+    private static async Task CheckTagEditorCloseDuringLoadAsync(string source, string fixtureDirectory)
+    {
+        var paths = Enumerable.Range(0, 12).Select(index => Path.Combine(fixtureDirectory, $"close during load {index}.wav")).ToArray();
+        foreach (var path in paths) File.Copy(source, path);
+        var before = await Task.WhenAll(paths.Select(async path => SHA256.HashData(await File.ReadAllBytesAsync(path))));
+        foreach (var useCancelButton in new[] { true, false })
+        {
+            var editor = new TagEditorWindow(paths);
+            var closed = false;
+            editor.Closed += (_, _) => closed = true;
+            var loading = editor.LoadAsync();
+            Check(!loading.IsCompleted && !Find<Button>(editor, "SaveTagsButton").IsEnabled,
+                "the close-during-load check interrupts active asynchronous tag reading");
+            if (useCancelButton) Click(Find<Button>(editor, "CancelTagsButton"));
+            else editor.Close();
+            await loading;
+            await WaitUntilAsync(() => closed,
+                (useCancelButton ? "Cancel" : "Close") + " finishes active tag reading before closing the editor");
+            Check(!editor.IsVisible && new WindowInteropHelper(editor).Handle == IntPtr.Zero,
+                "cancelling or closing a loading editor creates no native window");
+            var after = await Task.WhenAll(paths.Select(async path => SHA256.HashData(await File.ReadAllBytesAsync(path))));
+            Check(after.Zip(before).All(pair => pair.First.SequenceEqual(pair.Second)) &&
+                !Directory.EnumerateFiles(fixtureDirectory, ".museek-tags-*").Any(),
+                "closing during tag loading preserves every file byte-for-byte and leaves no temporary outputs");
+        }
+    }
+
+    private static void CheckContextMenuSelection(string first, string second)
+    {
+        var paths = new[] { first, second };
+        var itemIds = new IntPtr[paths.Length];
+        TagContextMenuService.IShellItemArray? selection = null;
+        try
+        {
+            for (var index = 0; index < paths.Length; index++)
+                Marshal.ThrowExceptionForHR(SHParseDisplayName(paths[index], IntPtr.Zero, out itemIds[index], 0, out _));
+            Marshal.ThrowExceptionForHR(SHCreateShellItemArrayFromIDLists((uint)itemIds.Length, itemIds, out selection));
+            IReadOnlyList<string>? received = null;
+            var callbacks = 0;
+            var command = new TagContextMenuService.TagCommand(value => { received = value; callbacks++; });
+            Check(command.Execute() != 0 && callbacks == 0,
+                "an Explorer tag command without a selection rejects execution");
+            Check(command.SetSelection(selection) == 0 && command.Execute() == 0 && callbacks == 1 &&
+                received?.SequenceEqual(paths, StringComparer.OrdinalIgnoreCase) == true,
+                "a real Shell selection hands Unicode and quoted paths to one editor callback in order");
+            command.SetNoShowUI(true);
+            Check(command.Execute() != 0 && callbacks == 1,
+                "a Shell no-UI invocation cannot accidentally open a tag editor");
+
+            var classId = Guid.NewGuid();
+            using var registration = TagContextMenuService.RegisterServer(value => { received = value; callbacks++; }, classId);
+            var executeId = typeof(TagContextMenuService.IExecuteCommand).GUID;
+            Marshal.ThrowExceptionForHR(CoCreateInstance(ref classId, IntPtr.Zero, 4, ref executeId, out var pointer));
+            try
+            {
+                var activated = Marshal.GetObjectForIUnknown(pointer);
+                var selectionSink = (TagContextMenuService.IObjectWithSelection)activated;
+                var executor = (TagContextMenuService.IExecuteCommand)activated;
+                Check(selectionSink.SetSelection(selection) == 0 && executor.Execute() == 0 && callbacks == 2 &&
+                    received?.SequenceEqual(paths, StringComparer.OrdinalIgnoreCase) == true,
+                    "the native COM local-server factory preserves a full multi-file selection");
+            }
+            finally { Marshal.Release(pointer); }
+        }
+        finally
+        {
+            if (selection is not null && Marshal.IsComObject(selection)) Marshal.FinalReleaseComObject(selection);
+            foreach (var itemId in itemIds) if (itemId != IntPtr.Zero) Marshal.FreeCoTaskMem(itemId);
+        }
+    }
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    private static extern int SHParseDisplayName(string name, IntPtr bindContext, out IntPtr itemId, uint attributes,
+        out uint attributesOut);
+    [DllImport("shell32.dll")]
+    private static extern int SHCreateShellItemArrayFromIDLists(uint count, [In] IntPtr[] itemIds,
+        [MarshalAs(UnmanagedType.Interface)] out TagContextMenuService.IShellItemArray selection);
+    [DllImport("ole32.dll")]
+    private static extern int CoCreateInstance(ref Guid classId, IntPtr outer, uint context, ref Guid interfaceId,
+        out IntPtr result);
 
     private static Border LayoutClosedMenu(MenuItem item)
     {

@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace Museek.Services;
 
@@ -8,6 +9,7 @@ public sealed class AppSettingsService
 {
     private readonly object _sync = new();
     private bool _singleWindowMode;
+    private bool _editTagsContextMenu;
 
     public AppSettingsService(string? settingsPath = null)
     {
@@ -23,41 +25,46 @@ public sealed class AppSettingsService
         get { lock (_sync) return _singleWindowMode; }
     }
 
+    public bool EditTagsContextMenu { get { lock (_sync) return _editTagsContextMenu; } }
+
     public void Reload()
     {
         lock (_sync)
         {
-            bool value;
-            try
-            {
-                using var stream = new FileStream(SettingsPath, FileMode.Open, FileAccess.Read,
-                    FileShare.ReadWrite | FileShare.Delete);
-                using var document = JsonDocument.Parse(stream);
-                if (document.RootElement.ValueKind != JsonValueKind.Object)
-                    throw new InvalidDataException("Museek settings must contain a JSON object.");
-
-                value = false;
-                foreach (var property in document.RootElement.EnumerateObject())
-                {
-                    if (!property.Name.Equals("singleWindowMode", StringComparison.OrdinalIgnoreCase))
-                        continue;
-                    if (property.Value.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
-                        throw new InvalidDataException("The single-window setting must be true or false.");
-                    value = property.Value.GetBoolean();
-                }
-            }
-            catch (FileNotFoundException) { value = false; }
-            catch (DirectoryNotFoundException) { value = false; }
-            catch (JsonException ex)
-            {
-                throw new InvalidDataException("Museek settings could not be read because the JSON is invalid.", ex);
-            }
-
-            _singleWindowMode = value;
+            var document = ReadDocument();
+            var single = ReadFlag(document, "singleWindowMode");
+            var tags = ReadFlag(document, "editTagsContextMenu");
+            _singleWindowMode = single;
+            _editTagsContextMenu = tags;
         }
     }
 
-    public void SetSingleWindowMode(bool enabled)
+    public void SetSingleWindowMode(bool enabled) => Save("singleWindowMode", enabled);
+    public void SetEditTagsContextMenu(bool enabled) => Save("editTagsContextMenu", enabled);
+
+    private JsonObject ReadDocument()
+    {
+        try
+        {
+            using var stream = new FileStream(SettingsPath, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            return JsonNode.Parse(stream) as JsonObject
+                ?? throw new InvalidDataException("Museek settings must contain a JSON object.");
+        }
+        catch (FileNotFoundException) { return new(); }
+        catch (DirectoryNotFoundException) { return new(); }
+        catch (JsonException ex) { throw new InvalidDataException("Museek settings contain invalid JSON.", ex); }
+    }
+
+    private static bool ReadFlag(JsonObject document, string name)
+    {
+        var entry = document.LastOrDefault(item => item.Key.Equals(name, StringComparison.OrdinalIgnoreCase));
+        if (entry.Key is null) return false;
+        if (entry.Value is JsonValue value && value.TryGetValue<bool>(out var flag)) return flag;
+        throw new InvalidDataException($"The {name} setting must be true or false.");
+    }
+
+    private void Save(string name, bool enabled)
     {
         lock (_sync)
         {
@@ -67,7 +74,19 @@ public sealed class AppSettingsService
                 $".{Path.GetFileName(SettingsPath)}-{Guid.NewGuid():N}.tmp");
             try
             {
-                var json = JsonSerializer.SerializeToUtf8Bytes(new { singleWindowMode = enabled },
+                JsonObject document;
+                try { document = ReadDocument(); }
+                catch (InvalidDataException)
+                {
+                    document = new JsonObject { ["singleWindowMode"] = _singleWindowMode,
+                        ["editTagsContextMenu"] = _editTagsContextMenu };
+                }
+                foreach (var key in document.Select(item => item.Key).Where(key => key.Equals(name,
+                    StringComparison.OrdinalIgnoreCase)).ToArray()) document.Remove(key);
+                document[name] = enabled;
+                var single = ReadFlag(document, "singleWindowMode");
+                var tags = ReadFlag(document, "editTagsContextMenu");
+                var json = JsonSerializer.SerializeToUtf8Bytes(document,
                     new JsonSerializerOptions { WriteIndented = true });
                 using (var stream = new FileStream(temporaryPath, FileMode.CreateNew,
                     FileAccess.Write, FileShare.None))
@@ -77,7 +96,8 @@ public sealed class AppSettingsService
                 }
 
                 File.Move(temporaryPath, SettingsPath, overwrite: true);
-                _singleWindowMode = enabled;
+                _singleWindowMode = single;
+                _editTagsContextMenu = tags;
             }
             finally
             {

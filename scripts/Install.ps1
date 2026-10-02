@@ -122,4 +122,5 @@ try {
 } finally { $uninstallKey.Dispose() }
 
 Write-Host "Installed Museek for your account at $installDirectory"
-Write-Host 'Open Museek from Start. Use its Default apps action to choose your audio defaults in Windows Settings.'
+Write-Host 'Open Museek from Start. Tools contains Default Apps and the optional Edit Tags context menu setting.'
+Write-Host 'When enabled, right-click selected audio files and choose Show more options > Edit Tags.'

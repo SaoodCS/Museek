@@ -2,13 +2,10 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
-using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Input;
-using System.Windows.Interop;
-using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using Microsoft.Win32;
@@ -24,6 +21,7 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _timer;
     private readonly string? _initialPath;
     private readonly AppSettingsService _settings;
+    private readonly Action<bool> _editTagsContextMenuRegistration;
     private string? _sourcePath;
     private CancellationTokenSource? _loadCancellation;
     private CancellationTokenSource? _saveCancellation;
@@ -46,9 +44,15 @@ public partial class MainWindow : Window
     public bool SingleWindowMode => _settings.SingleWindowMode;
     public void ShowStatus(string message) => StatusText.Text = message;
 
-    public MainWindow(string? initialPath = null, AppSettingsService? settings = null)
+    public MainWindow(string? initialPath = null, AppSettingsService? settings = null,
+        Action<bool>? editTagsContextMenuRegistration = null)
     {
         _settings = settings ?? new AppSettingsService();
+        _editTagsContextMenuRegistration = editTagsContextMenuRegistration ?? (enabled =>
+        {
+            if (enabled) TagContextMenuService.Register(Environment.ProcessPath!);
+            else TagContextMenuService.Unregister();
+        });
         InitializeComponent();
         RefreshSingleWindowMode();
         _initialPath = initialPath;
@@ -60,23 +64,7 @@ public partial class MainWindow : Window
         _timer.Start();
     }
 
-    private void Window_SourceInitialized(object? sender, EventArgs e)
-    {
-        var handle = new WindowInteropHelper(this).Handle;
-        SetCaptionAttribute(handle, 20, 1); // Native dark caption buttons.
-        if (!OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000)) return;
-        SetCaptionAttribute(handle, 35, ToColorRef(((SolidColorBrush)Background).Color));
-        SetCaptionAttribute(handle, 36, ToColorRef(((SolidColorBrush)Foreground).Color));
-        SetCaptionAttribute(handle, 34, ToColorRef(Color.FromRgb(0x30, 0x35, 0x2D)));
-    }
-
-    private static int ToColorRef(Color color) => color.R | (color.G << 8) | (color.B << 16);
-
-    private static void SetCaptionAttribute(IntPtr handle, int attribute, int value)
-    {
-        var result = DwmSetWindowAttribute(handle, attribute, ref value, sizeof(int));
-        if (result < 0) Debug.WriteLine($"Caption attribute {attribute} was unavailable: 0x{result:X8}.");
-    }
+    private void Window_SourceInitialized(object? sender, EventArgs e) => WindowThemeService.Apply(this);
 
     private async void Window_Loaded(object sender, RoutedEventArgs e)
     {
@@ -99,7 +87,11 @@ public partial class MainWindow : Window
     private void SetSingleWindowCheck(bool enabled)
     {
         _updatingSettings = true;
-        try { SingleWindowModeMenuItem.IsChecked = enabled; }
+        try
+        {
+            SingleWindowModeMenuItem.IsChecked = enabled;
+            EditTagsContextMenuItem.IsChecked = _settings.EditTagsContextMenu;
+        }
         finally { _updatingSettings = false; }
     }
 
@@ -109,12 +101,39 @@ public partial class MainWindow : Window
         try
         {
             _settings.SetSingleWindowMode(SingleWindowModeMenuItem.IsChecked);
+            SetSingleWindowCheck(_settings.SingleWindowMode);
             SingleWindowModeChanged?.Invoke(this, EventArgs.Empty);
         }
         catch (Exception ex)
         {
             SetSingleWindowCheck(_settings.SingleWindowMode);
             StatusText.Text = $"Couldn't save Museek settings: {ex.Message}";
+        }
+    }
+
+    private void EditTagsContextMenu_Changed(object sender, RoutedEventArgs e)
+    {
+        if (_updatingSettings) return;
+        var previous = _settings.EditTagsContextMenu;
+        var enabled = EditTagsContextMenuItem.IsChecked;
+        try
+        {
+            _editTagsContextMenuRegistration(enabled);
+            try { _settings.SetEditTagsContextMenu(enabled); }
+            catch
+            {
+                _editTagsContextMenuRegistration(previous);
+                throw;
+            }
+            SetSingleWindowCheck(_settings.SingleWindowMode);
+            SingleWindowModeChanged?.Invoke(this, EventArgs.Empty);
+            StatusText.Text = enabled ? "Edit Tags is available in Explorer under Show more options."
+                : "Edit Tags was removed from the Explorer context menu.";
+        }
+        catch (Exception ex)
+        {
+            SetSingleWindowCheck(_settings.SingleWindowMode);
+            StatusText.Text = $"Couldn't update the Edit Tags option: {ex.Message}";
         }
     }
 
@@ -556,8 +575,6 @@ public partial class MainWindow : Window
         _allowClose = true;
         _ = Dispatcher.BeginInvoke(Close);
     }
-    [DllImport("dwmapi.dll")]
-    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
 
     private void SetArtwork(byte[]? bytes)
     {

@@ -13,11 +13,12 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <Version>1.0.0</Version>
     <Product>Museek</Product>
-    <Description>A simple audio player and trimmer for Windows.</Description>
+    <Description>A simple audio player, trimmer and tag editor for Windows.</Description>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../Museek.Core/Museek.Core.csproj" />
     <PackageReference Include="LibVLCSharp" Version="3.10.1" />
     <PackageReference Include="VideoLAN.LibVLC.Windows" Version="3.0.24" />
+    <PackageReference Include="TagLibSharp" Version="2.3.0" />
   </ItemGroup>
 </Project>

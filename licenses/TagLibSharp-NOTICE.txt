@@ -1,0 +1,20 @@
+TagLibSharp 2.3.0
+
+Copyright (c) 2006-2007 Brian Nickel.
+Copyright (c) 2009-2020 Other contributors.
+Package authors: Brian Nickel, Gabriel Burt, Stephen Shaw, and contributors.
+Individual source files identify additional authors and copyright notices.
+
+Distributed under the GNU Lesser General Public License, version 2.1 only.
+See LGPL-2.1.txt in this directory for the complete license text.
+
+Official binary package:
+https://www.nuget.org/packages/TagLibSharp/2.3.0
+
+Corresponding source and its copyright notices:
+https://github.com/mono/taglib-sharp/tree/TaglibSharp-2.3.0.0
+
+Museek uses the unmodified, separately replaceable TagLibSharp.dll from the
+official NuGet package. Replacing that DLL with a compatible modified version
+is permitted. The library is not embedded in Museek.exe or used to transcode
+audio. No warranty is provided by the library's authors.

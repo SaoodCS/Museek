@@ -15,6 +15,7 @@
           <MenuItem Header="Choose Museek as default…" Click="DefaultApp_Click" />
           <Separator Style="{StaticResource MenuSeparatorStyle}" />
           <MenuItem x:Name="SingleWindowModeMenuItem" Header="Single-window mode" IsCheckable="True" Checked="SingleWindowMode_Changed" Unchecked="SingleWindowMode_Changed" />
+          <MenuItem x:Name="EditTagsContextMenuItem" Header="'Edit Tags' context menu" IsCheckable="True" Checked="EditTagsContextMenu_Changed" Unchecked="EditTagsContextMenu_Changed" />
         </MenuItem>
         <MenuItem x:Name="HelpMenu" Header="_Help" Style="{StaticResource TopMenuStyle}">
           <MenuItem Header="About Museek" Click="About_Click" />

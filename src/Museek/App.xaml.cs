@@ -9,6 +9,9 @@ namespace Museek;
 public partial class App : Application
 {
     private SingleWindowService? _singleWindow;
+    private IDisposable? _tagContextServer;
+    private DispatcherTimer? _tagServerIdle;
+    private readonly HashSet<TagEditorWindow> _tagEditors = [];
 
     protected override async void OnStartup(StartupEventArgs e)
     {
@@ -20,6 +23,10 @@ public partial class App : Application
             {
                 WindowsIntegrationService.Register(Environment.ProcessPath
                     ?? throw new InvalidOperationException("Cannot locate Museek.exe."));
+                var settings = new AppSettingsService();
+                try { settings.Reload(); }
+                catch (Exception ex) { Debug.WriteLine($"Optional tag-menu preferences could not be read: {ex.Message}"); }
+                if (settings.EditTagsContextMenu) TagContextMenuService.Register(Environment.ProcessPath!);
                 Shutdown(0);
             }
             catch (Exception ex)
@@ -32,6 +39,23 @@ public partial class App : Application
 
         try
         {
+            // Editing is independent of playback and never forwards through single-window mode.
+            if (e.Args.FirstOrDefault() == "--edit-tags")
+            {
+                ShutdownMode = ShutdownMode.OnExplicitShutdown;
+                OpenTagEditor(e.Args.Skip(1).ToArray());
+                return;
+            }
+            if (e.Args.FirstOrDefault() == "--tag-context-server")
+            {
+                ShutdownMode = ShutdownMode.OnExplicitShutdown;
+                _tagServerIdle = new DispatcherTimer { Interval = TimeSpan.FromSeconds(30) };
+                _tagServerIdle.Tick += (_, _) => { if (_tagEditors.Count == 0) Shutdown(); };
+                _tagContextServer = TagContextMenuService.RegisterServer(paths =>
+                    Dispatcher.Invoke(() => OpenTagEditor(paths)));
+                _tagServerIdle.Start();
+                return;
+            }
             var argument = e.Args.FirstOrDefault();
             var path = string.IsNullOrWhiteSpace(argument) ? null : Path.GetFullPath(argument);
             var settings = new AppSettingsService();
@@ -83,6 +107,38 @@ public partial class App : Application
         }
     }
 
+    private void OpenTagEditor(IReadOnlyList<string> paths)
+    {
+        if (paths.Count == 0) throw new ArgumentException("Select one or more audio files to edit.");
+        var editor = new TagEditorWindow(paths);
+        _tagServerIdle?.Stop();
+        _tagEditors.Add(editor);
+        editor.Closed += (_, _) =>
+        {
+            _tagEditors.Remove(editor);
+            if (_tagEditors.Count != 0) return;
+            if (_tagServerIdle is not null)
+            {
+                _tagServerIdle.Interval = TimeSpan.FromSeconds(2);
+                _tagServerIdle.Start();
+            }
+            else Shutdown();
+        };
+        try
+        {
+            editor.Show();
+            editor.Activate();
+        }
+        catch
+        {
+            _tagEditors.Remove(editor);
+            try { editor.Close(); }
+            catch (Exception ex) { Debug.WriteLine(ex); }
+            if (_tagEditors.Count == 0) _tagServerIdle?.Start();
+            throw;
+        }
+    }
+
     private Task<bool> AcceptOpenRequestAsync(string? path, CancellationToken cancellationToken)
         => Dispatcher.InvokeAsync(() => !cancellationToken.IsCancellationRequested && MainWindow is MainWindow window && window.AcceptOpenRequest(path),
             DispatcherPriority.Normal, cancellationToken).Task;
@@ -106,6 +162,9 @@ public partial class App : Application
 
     protected override void OnExit(ExitEventArgs e)
     {
+        _tagServerIdle?.Stop();
+        try { _tagContextServer?.Dispose(); }
+        catch (Exception ex) { Debug.WriteLine(ex); }
         try { _singleWindow?.Dispose(); }
         catch (Exception ex) { Debug.WriteLine(ex); }
         base.OnExit(e);

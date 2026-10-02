@@ -1,0 +1,117 @@
+<Window x:Class="Museek.TagEditorWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Edit Tags · Museek" Width="840" Height="790" MinWidth="710" MinHeight="620"
+        Background="#1E231D" Foreground="#EDEFE8" FontFamily="Segoe UI" FontSize="13"
+        WindowStartupLocation="CenterScreen" Loaded="Window_Loaded"
+        SourceInitialized="Window_SourceInitialized" Closing="Window_Closing" Closed="Window_Closed">
+  <Window.Resources>
+    <Style TargetType="ScrollBar">
+      <Setter Property="Width" Value="10" />
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ScrollBar">
+            <Grid Background="#252B21">
+              <Track x:Name="PART_Track" Orientation="Vertical" IsDirectionReversed="True">
+                <Track.DecreaseRepeatButton><RepeatButton Command="ScrollBar.PageUpCommand" Focusable="False"><RepeatButton.Template><ControlTemplate TargetType="RepeatButton"><Border Background="Transparent" /></ControlTemplate></RepeatButton.Template></RepeatButton></Track.DecreaseRepeatButton>
+                <Track.Thumb><Thumb><Thumb.Template><ControlTemplate TargetType="Thumb"><Border Background="#59644F" CornerRadius="4" Margin="2,0" /></ControlTemplate></Thumb.Template></Thumb></Track.Thumb>
+                <Track.IncreaseRepeatButton><RepeatButton Command="ScrollBar.PageDownCommand" Focusable="False"><RepeatButton.Template><ControlTemplate TargetType="RepeatButton"><Border Background="Transparent" /></ControlTemplate></RepeatButton.Template></RepeatButton></Track.IncreaseRepeatButton>
+              </Track>
+            </Grid>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style TargetType="TextBox">
+      <Setter Property="Background" Value="#292F26" />
+      <Setter Property="Foreground" Value="#EDEFE8" />
+      <Setter Property="CaretBrush" Value="#C5F277" />
+      <Setter Property="SelectionBrush" Value="#687E48" />
+      <Setter Property="BorderBrush" Value="#444E3B" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="Padding" Value="10,8" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="TextBox">
+            <Border x:Name="FieldBorder" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="6" Padding="{TemplateBinding Padding}">
+              <ScrollViewer x:Name="PART_ContentHost" />
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsKeyboardFocusWithin" Value="True"><Setter TargetName="FieldBorder" Property="BorderBrush" Value="{StaticResource Accent}" /></Trigger>
+              <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.45" /></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style TargetType="CheckBox">
+      <Setter Property="Foreground" Value="#EDEFE8" />
+      <Setter Property="Margin" Value="0,0,0,6" />
+      <Setter Property="Cursor" Value="Hand" />
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="CheckBox">
+            <StackPanel Orientation="Horizontal" Background="Transparent">
+              <Border x:Name="CheckBorder" Width="16" Height="16" CornerRadius="3" BorderThickness="1" BorderBrush="#748268" Background="#292F26" Margin="0,0,8,0">
+                <Path x:Name="Tick" Data="M 2,7 L 5,10 L 12,3" Stroke="#1E231D" StrokeThickness="2" Visibility="Collapsed" />
+              </Border>
+              <ContentPresenter VerticalAlignment="Center" />
+            </StackPanel>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsChecked" Value="True"><Setter TargetName="CheckBorder" Property="Background" Value="{StaticResource Accent}" /><Setter TargetName="Tick" Property="Visibility" Value="Visible" /></Trigger>
+              <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="CheckBorder" Property="BorderBrush" Value="{StaticResource Accent}" /></Trigger>
+              <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.45" /></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+  </Window.Resources>
+  <Grid Margin="26,20,26,22">
+    <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+    <StackPanel Margin="0,0,0,20">
+      <TextBlock Text="Edit Tags" FontSize="26" FontWeight="SemiBold" />
+      <TextBlock x:Name="SelectionSummary" Foreground="{StaticResource Muted}" Margin="0,7,0,0" />
+      <TextBlock Text="Only checked fields are changed. Check an empty field to clear it." Foreground="{StaticResource Muted}" Margin="0,5,0,0" TextWrapping="Wrap" />
+    </StackPanel>
+    <Grid Grid.Row="1">
+      <Grid.ColumnDefinitions><ColumnDefinition Width="210" /><ColumnDefinition Width="24" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+      <Grid>
+        <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+        <Border Width="210" Height="210" CornerRadius="12" Background="#292F26" ClipToBounds="True">
+          <Grid>
+            <Image x:Name="ArtworkImage" Stretch="UniformToFill" Visibility="Collapsed" />
+            <TextBlock x:Name="ArtworkPlaceholder" Text="No artwork" Foreground="{StaticResource Muted}" TextWrapping="Wrap" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="14" TextAlignment="Center" />
+          </Grid>
+        </Border>
+        <TextBlock x:Name="ArtworkStatus" Grid.Row="1" Text="Keep existing artwork" Foreground="{StaticResource Muted}" Margin="0,10,0,8" TextWrapping="Wrap" />
+        <UniformGrid x:Name="ArtworkButtons" Grid.Row="2" Columns="2" Margin="0,0,0,6">
+          <Button x:Name="ChangeArtworkButton" Content="Add / change" Padding="8,9" Margin="0,0,5,0" Click="ChangeArtwork_Click" />
+          <Button x:Name="RemoveArtworkButton" Content="Remove" Padding="8,9" Margin="5,0,0,0" Click="RemoveArtwork_Click" />
+        </UniformGrid>
+        <Button x:Name="KeepArtworkButton" Grid.Row="3" Content="Keep original artwork" Padding="8,8" Margin="0,0,0,18" Click="KeepArtwork_Click" />
+        <Border Grid.Row="4" Background="#252B21" CornerRadius="8" Padding="12">
+          <DockPanel>
+            <TextBlock DockPanel.Dock="Top" Text="Selected files" FontWeight="SemiBold" Margin="0,0,0,8" />
+            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+              <ItemsControl x:Name="FilesList">
+                <ItemsControl.ItemTemplate><DataTemplate><TextBlock Text="{Binding}" Foreground="{StaticResource Muted}" TextWrapping="Wrap" Margin="0,0,0,9" /></DataTemplate></ItemsControl.ItemTemplate>
+              </ItemsControl>
+            </ScrollViewer>
+          </DockPanel>
+        </Border>
+      </Grid>
+      <ScrollViewer Grid.Column="2" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="0,0,12,0">
+        <StackPanel x:Name="FieldsPanel" />
+      </ScrollViewer>
+    </Grid>
+    <ScrollViewer Grid.Row="2" MaxHeight="96" Margin="0,18,0,16" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+      <TextBlock x:Name="TagStatus" Text="Reading tags…" Foreground="{StaticResource Muted}" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
+    </ScrollViewer>
+    <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right">
+      <Button x:Name="CancelTagsButton" Content="Cancel" Click="CancelTags_Click" Margin="0,0,10,0" IsCancel="True" />
+      <Button x:Name="SaveTagsButton" Content="Save tags" Background="{StaticResource Accent}" Foreground="#1E231D" Click="SaveTags_Click" IsDefault="True" IsEnabled="False" />
+    </StackPanel>
+  </Grid>
+</Window>
