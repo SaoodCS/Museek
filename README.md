@@ -70,7 +70,7 @@ The first line lets the development app find FFmpeg and FFprobe. Repeat it when 
 
 Supported **C#** edits can hot reload while the app is running. Other edits may require a restart. **XAML layout changes are not automatically hot reloaded in this VS Code flow**; press **Ctrl+R** in the terminal to rebuild and restart after saving them. Press **Ctrl+C** to stop development. See the [dotnet watch documentation](https://learn.microsoft.com/en-us/dotnet/core/tools/dotnet-watch) for supported changes.
 
-To run without watching for changes, use `dotnet run --project .\src\Museek\Museek.csproj` instead, after setting the audio tools path above. The app code is in `src\Museek`; its trim-selection model is in `src\Museek.Core`.
+To run without watching for changes, use `dotnet run --project .\src\Museek\Museek.csproj` instead, after setting the audio tools path above. The app code is in `src\Museek`; its trim-selection model is in `src\Museek.Core`. The player window code is grouped by playback, file operations, and settings. Disposable integration checks live in `tests`; generated tools, builds, and test artifacts are ignored by Git.
 
 ## Build
 
@@ -98,6 +98,8 @@ You can start the built app from the same terminal:
 ```
 
 `-SkipChecks` makes a faster build while developing. Use the full command above when preparing a release.
+
+The full build also checks managed allocations during playback updates, seeking, and large-artwork validation. To record those measurements separately, run `dotnet run --project tests/PerformanceChecks -c Release`. Results are saved in `artifacts/performance-checks.json`; see [the performance checks](tests/PerformanceChecks/README.md) for details.
 
 ## Releasing
 
@@ -130,4 +132,4 @@ git push origin v1.2.0
 
 GitHub Actions builds and checks that tagged version, then publishes **Museek 1.2.0** with its installer, release notes, README, changelog, third-party notices, licenses and SHA256 checksums. GitHub also supplies source archives. Check the workflow under **Actions** and confirm the files on the **Releases** page.
 
-No personal access token is needed for the workflow; it uses GitHub's built-in token. Existing published releases are not overwritten. See the [full release guide](https://github.com/SaoodCS/Museek/blob/main/docs/RELEASING.md) for permissions and failure recovery.
+No personal access token is needed for the workflow; it uses GitHub's built-in token. Existing published releases are not overwritten. If a workflow fails, review its Actions log before retrying. Fix source or packaging problems in a new commit and use a new version tag; never move a published tag or replace its assets.

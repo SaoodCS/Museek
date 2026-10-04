@@ -11,3 +11,5 @@ With `CI=true`, the harness uses VLC's dummy audio output so playback checks can
 The window stays unshown. Rendered client-content snapshots are saved as `artifacts/normal.png`, `artifacts/trim.png`, and `artifacts/artwork.png` beside this project. Their size follows the production window dimensions, with 31 pixels reserved for its title bar. An optional command-line argument chooses the artifacts directory. Test fixtures are removed after each run.
 
 Save-file dialogs and Windows default-app registration require separate interactive checks; this harness never invokes them.
+
+For a focused tag-editor run, pass an artifacts directory followed by `--tag-editor-only`. Failed fixture saves include each file's error so intermittent native replacement failures can be diagnosed.

@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Globalization;
 using System.IO;
+using System.Security.Cryptography;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
@@ -75,12 +76,13 @@ public partial class TagEditorWindow : Window
     {
         SetBusy(true);
         var errors = new List<string>();
+        var artworkPool = new Dictionary<string, List<byte[]>>(StringComparer.Ordinal);
         try
         {
             foreach (var path in _paths)
             {
                 _lifetime.Token.ThrowIfCancellationRequested();
-                try { _tags.Add(await _service.ReadAsync(path, _lifetime.Token)); }
+                try { _tags.Add(ShareArtwork(await _service.ReadAsync(path, _lifetime.Token), artworkPool)); }
                 catch (OperationCanceledException) { throw; }
                 catch (Exception ex) { errors.Add($"{Path.GetFileName(path)}: {ex.Message}"); }
             }
@@ -100,9 +102,9 @@ public partial class TagEditorWindow : Window
         {
             foreach (var (name, field) in _fields)
             {
-                var values = _tags.Select(tag => GetValue(tag, name)).Distinct(StringComparer.Ordinal).ToArray();
-                var mixed = values.Length > 1;
-                field.Value.Text = values.Length == 1 ? values[0] : "";
+                var value = _tags.Count > 0 ? GetValue(_tags[0], name) : "";
+                var mixed = _tags.Skip(1).Any(tag => !StringComparer.Ordinal.Equals(value, GetValue(tag, name)));
+                field.Value.Text = mixed ? "" : value;
                 field.Apply.IsChecked = false;
                 field.Hint.Text = mixed ? "Mixed values — left unchanged unless checked" : "";
                 field.Hint.Visibility = mixed ? Visibility.Visible : Visibility.Collapsed;
@@ -171,12 +173,18 @@ public partial class TagEditorWindow : Window
             var result = await _service.ApplyAsync(_tags.Select(tag => tag.Path).ToArray(), patch, progress, _saveCancellation.Token);
             var saved = result.Files.Count(file => file.Success);
             var failures = result.Files.Where(file => !file.Success).Select(file => $"{Path.GetFileName(file.Path)}: {file.Error}").ToArray();
+            var successfulPaths = result.Files.Where(file => file.Success).Select(file => file.Path)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var artworkPool = new Dictionary<string, List<byte[]>>(StringComparer.Ordinal);
             // Refresh the committed files so repeated edits start from the current tags.
             for (var index = 0; index < _tags.Count && !_lifetime.IsCancellationRequested; index++)
-                if (result.Files.Any(file => file.Success && file.Path.Equals(_tags[index].Path, StringComparison.OrdinalIgnoreCase)))
+            {
+                if (successfulPaths.Contains(_tags[index].Path))
                     try { _tags[index] = await _service.ReadAsync(_tags[index].Path, _lifetime.Token); }
                     catch (OperationCanceledException) { break; }
                     catch (Exception ex) { System.Diagnostics.Debug.WriteLine(ex); }
+                _tags[index] = ShareArtwork(_tags[index], artworkPool);
+            }
             if (!result.Cancelled && failures.Length == 0) PopulateFields();
             TagStatus.Text = $"{(result.Cancelled ? "Stopped. " : "") }Saved tags for {saved} of {_tags.Count} files."
                 + (failures.Length == 0 ? "" : "\n" + string.Join("\n", failures));
@@ -202,10 +210,26 @@ public partial class TagEditorWindow : Window
         CancelTagsButton.Content = _saving ? "Stop saving" : "Cancel";
     }
 
+    private static AudioTags ShareArtwork(AudioTags tags, Dictionary<string, List<byte[]>> artworkPool)
+    {
+        if (tags.ArtworkBytes is not { } artwork) return tags;
+        var key = Convert.ToHexString(SHA256.HashData(artwork));
+        if (artworkPool.TryGetValue(key, out var candidates))
+        {
+            foreach (var candidate in candidates)
+                if (ReferenceEquals(candidate, artwork)) return tags;
+                else if (candidate.AsSpan().SequenceEqual(artwork)) return tags with { ArtworkBytes = candidate };
+            candidates.Add(artwork);
+        }
+        else artworkPool.Add(key, [artwork]);
+        return tags;
+    }
+
     private void ShowOriginalArtwork()
     {
         var first = _tags.FirstOrDefault()?.ArtworkBytes;
-        var common = _tags.All(tag => first is null ? tag.ArtworkBytes is null : tag.ArtworkBytes is not null && first.SequenceEqual(tag.ArtworkBytes));
+        var common = _tags.All(tag => ReferenceEquals(first, tag.ArtworkBytes) ||
+            first is not null && tag.ArtworkBytes is not null && first.AsSpan().SequenceEqual(tag.ArtworkBytes));
         ShowArtwork(common ? first : null, common ? "No artwork" : "Different artwork");
         ArtworkStatus.Text = "Keep existing artwork";
     }

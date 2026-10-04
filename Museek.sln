@@ -27,6 +27,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "RegistrationChecks", "tests
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "InstallerFixture", "tests\InstallerFixture\InstallerFixture.csproj", "{DFD30393-E0AB-40F1-B289-8B17F6B40724}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PerformanceChecks", "tests\PerformanceChecks\PerformanceChecks.csproj", "{2843C641-05FA-46DB-9370-E730EAA242E5}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -157,6 +159,18 @@ Global
 		{DFD30393-E0AB-40F1-B289-8B17F6B40724}.Release|x64.Build.0 = Release|Any CPU
 		{DFD30393-E0AB-40F1-B289-8B17F6B40724}.Release|x86.ActiveCfg = Release|Any CPU
 		{DFD30393-E0AB-40F1-B289-8B17F6B40724}.Release|x86.Build.0 = Release|Any CPU
+		{2843C641-05FA-46DB-9370-E730EAA242E5}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{2843C641-05FA-46DB-9370-E730EAA242E5}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{2843C641-05FA-46DB-9370-E730EAA242E5}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{2843C641-05FA-46DB-9370-E730EAA242E5}.Debug|x64.Build.0 = Debug|Any CPU
+		{2843C641-05FA-46DB-9370-E730EAA242E5}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{2843C641-05FA-46DB-9370-E730EAA242E5}.Debug|x86.Build.0 = Debug|Any CPU
+		{2843C641-05FA-46DB-9370-E730EAA242E5}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{2843C641-05FA-46DB-9370-E730EAA242E5}.Release|Any CPU.Build.0 = Release|Any CPU
+		{2843C641-05FA-46DB-9370-E730EAA242E5}.Release|x64.ActiveCfg = Release|Any CPU
+		{2843C641-05FA-46DB-9370-E730EAA242E5}.Release|x64.Build.0 = Release|Any CPU
+		{2843C641-05FA-46DB-9370-E730EAA242E5}.Release|x86.ActiveCfg = Release|Any CPU
+		{2843C641-05FA-46DB-9370-E730EAA242E5}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -172,5 +186,6 @@ Global
 		{1F520A48-11F8-42BE-946E-3662F133E7C7} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
 		{898BDEE5-65B2-464E-9F36-7DCBCDA37495} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
 		{DFD30393-E0AB-40F1-B289-8B17F6B40724} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
+		{2843C641-05FA-46DB-9370-E730EAA242E5} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
 	EndGlobalSection
 EndGlobal

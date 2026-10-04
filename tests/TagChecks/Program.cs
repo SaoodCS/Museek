@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
@@ -23,6 +24,64 @@ try
         "color=c=0xe15337:s=80x64:d=1", "-frames:v", "1", "-pix_fmt", "yuvj420p", "-update", "1", "-y", jpegPath);
     var png = await File.ReadAllBytesAsync(pngPath);
     var jpeg = await File.ReadAllBytesAsync(jpegPath);
+
+    // Measure the real validation paths without including fixture creation, async
+    // scheduling or reflection setup in the managed allocation count.
+    var validateArtwork = typeof(AudioTagService).GetMethod("ValidatePatch", BindingFlags.Static | BindingFlags.NonPublic)!
+        .CreateDelegate<Func<TagEditPatch, string?>>();
+    var verifyPatch = typeof(AudioTagService).GetMethod("VerifyPatch", BindingFlags.Static | BindingFlags.NonPublic)!
+        .CreateDelegate<Action<TagLib.File, TagEditPatch>>();
+    var readFileTags = typeof(AudioTagService).GetMethod("ReadFileTags", BindingFlags.Static | BindingFlags.NonPublic)!
+        .CreateDelegate<Func<TagLib.File, string, bool, AudioTags>>();
+    var largeCoverPath = Path.Combine(folder, "large cover.png");
+    await RunToolAsync("ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+        "color=c=0x238fa8:s=4098x4098:d=1", "-frames:v", "1", "-pix_fmt", "rgb24", "-update", "1", "-y", largeCoverPath);
+    var largeCover = await File.ReadAllBytesAsync(largeCoverPath);
+    var largePatch = new TagEditPatch { ArtworkAction = ArtworkAction.Replace, ArtworkBytes = largeCover };
+    validateArtwork(new TagEditPatch { ArtworkAction = ArtworkAction.Replace, ArtworkBytes = png });
+    var allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+    var largeMime = validateArtwork(largePatch);
+    var validationBytes = GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
+
+    var verificationSource = Path.Combine(folder, "verification allocation source.flac");
+    await RunToolAsync("ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+        "sine=frequency=397:duration=0.1", "-c:a", "flac", "-y", verificationSource);
+    long verificationBytes;
+    long readBytes;
+    bool isolatedArtwork;
+    using (var verificationFile = TagLib.File.Create(verificationSource))
+    {
+        verificationFile.Tag.Title = "Selected title";
+        verificationFile.Tag.Pictures = [new TagLib.Picture(new TagLib.ByteVector(new byte[6 * 1024 * 1024]))
+            { Type = TagLib.PictureType.FrontCover, MimeType = "image/png" }];
+        var textPatch = new TagEditPatch { Title = "Selected title" };
+        verifyPatch(verificationFile, textPatch);
+        allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+        verifyPatch(verificationFile, textPatch);
+        verificationBytes = GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
+        readFileTags(verificationFile, verificationSource, true);
+        allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+        var readTags = readFileTags(verificationFile, verificationSource, true);
+        readBytes = GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
+        readTags.ArtworkBytes![0] = 1;
+        isolatedArtwork = verificationFile.Tag.Pictures[0].Data[0] == 0;
+    }
+    Console.WriteLine($"Managed allocations: large-cover validation {validationBytes:N0} bytes; text-only verification {verificationBytes:N0} bytes; artwork read {readBytes:N0} bytes.");
+    Check(largeMime == "image/png", "large valid artwork with partial edge tiles is accepted");
+    Check(validationBytes < 4 * 1024 * 1024, "artwork validation uses bounded managed scratch memory");
+    Check(verificationBytes < 1024 * 1024, "text-only verification does not copy unrelated cover bytes");
+    Check(readBytes < 7 * 1024 * 1024, "reading artwork allocates one owned cover buffer");
+    Check(isolatedArtwork, "mutating returned artwork does not change the loaded tag data");
+    // Retain a complete PNG signature/IHDR with valid dimensions, but no pixels.
+    var corruptCover = largeCover.AsSpan(0, 33).ToArray();
+    var corruptRejected = false;
+    try { validateArtwork(new TagEditPatch { ArtworkAction = ArtworkAction.Replace, ArtworkBytes = corruptCover }); }
+    catch (InvalidDataException) { corruptRejected = true; }
+    Check(corruptRejected, "artwork validation rejects an intact image header without encoded pixels");
+    if (args.Contains("--allocation-checks-only", StringComparer.Ordinal)) return;
+    await CheckReplacementRecoveryAsync(verificationSource);
+    if (args.Contains("--replacement-checks-only", StringComparer.Ordinal)) return;
+
     var fixtures = new List<string>();
     foreach (var format in new (string Extension, string Codec)[]
     {
@@ -352,6 +411,108 @@ try
         var result = await service.ApplyAsync(paths, patch);
         Check(!result.Cancelled && result.Files.Count == paths.Count && result.Files.All(file => file.Success),
             description + (result.Files.Any(file => !file.Success) ? ": " + string.Join("; ", result.Files.Select(file => file.Error)) : ""));
+    }
+
+    async Task CheckReplacementRecoveryAsync(string template)
+    {
+        const int unableToRemoveReplaced = unchecked((int)0x80070497);
+        var patch = new TagEditPatch { Title = "Recovered title" };
+        string CopyInput(string name)
+        {
+            var path = Path.Combine(folder, name + ".flac");
+            File.Copy(template, path);
+            return path;
+        }
+        var recovered = CopyInput("recover replacement");
+        var attempts = 0;
+        var retrying = new AudioTagService((temporary, path) =>
+        {
+            if (++attempts == 1) throw new IOException("Injected replacement removal failure.", unableToRemoveReplaced);
+            File.Replace(temporary, path, destinationBackupFileName: null);
+        });
+        var result = await retrying.ApplyAsync([recovered], patch);
+        Check(!result.Cancelled && result.Files.Count == 1 && result.Files[0].Success && attempts == 2 &&
+            (await service.ReadAsync(recovered)).Title == "Recovered title",
+            "a transient native1175 replacement failure retries and commits verified tags");
+        CheckNoTemporaryFiles();
+
+        var exhausted = CopyInput("exhaust replacement");
+        var originalHash = await HashAsync(exhausted);
+        attempts = 0;
+        var namesPreserved = true;
+        retrying = new AudioTagService((temporary, path) =>
+        {
+            attempts++;
+            namesPreserved &= File.Exists(temporary) && File.Exists(path) &&
+                SHA256.HashData(File.ReadAllBytes(path)).SequenceEqual(originalHash);
+            throw new IOException("Injected persistent replacement removal failure.", unableToRemoveReplaced);
+        });
+        result = await retrying.ApplyAsync([exhausted], patch);
+        Check(!result.Cancelled && result.Files.Count == 1 && !result.Files[0].Success && attempts == 4 &&
+            namesPreserved && (await HashAsync(exhausted)).SequenceEqual(originalHash),
+            "exhausted replacement retries keep the original and staged names intact until cleanup");
+        CheckNoTemporaryFiles();
+
+        var cancelled = CopyInput("cancel replacement retry");
+        originalHash = await HashAsync(cancelled);
+        attempts = 0;
+        using (var cancellation = new CancellationTokenSource())
+        {
+            retrying = new AudioTagService((_, _) =>
+            {
+                attempts++;
+                cancellation.Cancel();
+                throw new IOException("Injected replacement removal failure before cancellation.", unableToRemoveReplaced);
+            });
+            result = await retrying.ApplyAsync([cancelled], patch, cancellationToken: cancellation.Token);
+        }
+        Check(result.Cancelled && result.Files.Count == 1 && !result.Files[0].Success && attempts == 1 &&
+            (await HashAsync(cancelled)).SequenceEqual(originalHash),
+            "cancelling replacement backoff prevents another attempt and preserves the original");
+        CheckNoTemporaryFiles();
+
+        var conflict = CopyInput("replace source between retries");
+        originalHash = await HashAsync(conflict);
+        var external = CopyInput("external replacement between retries");
+        using (var externalFile = TagLib.File.Create(external))
+        {
+            externalFile.Tag.Title = "External replacement";
+            externalFile.Save();
+        }
+        var externalHash = await HashAsync(external);
+        var displaced = Path.Combine(folder, "displaced retry original.flac");
+        attempts = 0;
+        retrying = new AudioTagService((_, path) =>
+        {
+            attempts++;
+            File.Move(path, displaced);
+            File.Copy(external, path);
+            throw new IOException("Injected replacement removal failure after external replacement.", unableToRemoveReplaced);
+        });
+        result = await retrying.ApplyAsync([conflict], patch);
+        Check(!result.Cancelled && result.Files.Count == 1 && !result.Files[0].Success && attempts == 1 &&
+            result.Files[0].Error?.Contains("source file changed", StringComparison.OrdinalIgnoreCase) == true &&
+            (await HashAsync(conflict)).SequenceEqual(externalHash) &&
+            (await HashAsync(displaced)).SequenceEqual(originalHash),
+            "replacement retries reject a changed source and preserve the external replacement");
+        CheckNoTemporaryFiles();
+
+        foreach (var nativeError in new[] { 1176, 1177 })
+        {
+            var terminal = CopyInput("terminal replacement error " + nativeError);
+            originalHash = await HashAsync(terminal);
+            attempts = 0;
+            retrying = new AudioTagService((_, _) =>
+            {
+                attempts++;
+                throw new IOException("Injected terminal replacement error.", unchecked((int)(0x80070000u | (uint)nativeError)));
+            });
+            result = await retrying.ApplyAsync([terminal], patch);
+            Check(!result.Cancelled && result.Files.Count == 1 && !result.Files[0].Success && attempts == 1 &&
+                (await HashAsync(terminal)).SequenceEqual(originalHash),
+                "native" + nativeError + " replacement errors are terminal without a fallback overwrite");
+            CheckNoTemporaryFiles();
+        }
     }
 }
 finally

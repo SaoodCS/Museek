@@ -21,7 +21,13 @@ public partial class RangeSeekBar : UserControl
     public double Position
     {
         get => _position;
-        set { _position = Math.Clamp(double.IsFinite(value) ? value : 0, 0, Duration); Render(); }
+        set
+        {
+            var position = Math.Clamp(double.IsFinite(value) ? value : 0, 0, Duration);
+            if (_position == position) return;
+            _position = position;
+            RenderPosition();
+        }
     }
 
     public bool IsTrimMode
@@ -29,9 +35,10 @@ public partial class RangeSeekBar : UserControl
         get => _trimMode;
         set
         {
+            if (_trimMode == value) return;
             _trimMode = value;
             StartHandle.Visibility = EndHandle.Visibility = value ? Visibility.Visible : Visibility.Collapsed;
-            Render();
+            RenderSelection();
         }
     }
 
@@ -48,7 +55,7 @@ public partial class RangeSeekBar : UserControl
     public void ResetSelection()
     {
         _selection.Reset(Duration);
-        Render();
+        RenderSelection();
         SelectionChanged?.Invoke(this, EventArgs.Empty);
     }
 
@@ -59,9 +66,23 @@ public partial class RangeSeekBar : UserControl
     {
         if (Surface is null) return;
         TrackBackground.Width = TrackWidth;
+        RenderSelection();
+        RenderPosition();
+    }
+
+    private void RenderPosition()
+    {
+        if (Surface is null) return;
+        Canvas.SetLeft(Playhead, X(Position) - 7);
+        if (!IsTrimMode)
+            TrackFill.Width = Duration > 0 ? Math.Max(0, Position / Duration * TrackWidth) : 0;
+    }
+
+    private void RenderSelection()
+    {
+        if (Surface is null) return;
         Canvas.SetLeft(TrackFill, X(IsTrimMode ? SelectionStart : 0));
         TrackFill.Width = Duration > 0 ? Math.Max(0, (IsTrimMode ? SelectionEnd - SelectionStart : Position) / Duration * TrackWidth) : 0;
-        Canvas.SetLeft(Playhead, X(Position) - 7);
         Canvas.SetLeft(StartHandle, X(SelectionStart) - 7);
         Canvas.SetLeft(EndHandle, X(SelectionEnd) - 7);
         StartHandle.ToolTip = $"Start: {TimeSpan.FromSeconds(SelectionStart):h\\:mm\\:ss\\.fff} • Arrow keys to adjust";
@@ -89,13 +110,13 @@ public partial class RangeSeekBar : UserControl
     private void ChangeStart(double value)
     {
         _selection.SetStart(value);
-        Render();
+        RenderSelection();
         SelectionChanged?.Invoke(this, EventArgs.Empty);
     }
     private void ChangeEnd(double value)
     {
         _selection.SetEnd(value);
-        Render();
+        RenderSelection();
         SelectionChanged?.Invoke(this, EventArgs.Empty);
     }
 

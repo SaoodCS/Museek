@@ -1,9 +1,0 @@
-# Windows installer
-
-Use NSIS to build a standalone `dist/setup.exe` containing the published Windows x64 app. Install for the current account at `%LOCALAPPDATA%\Programs\Museek`; reuse the registered location for subsequent updates. Add a Start menu shortcut and Windows Installed apps entry pointing at the installed `uninstall.exe`. Settings live separately and survive updates and uninstall.
-
-1. Add native setup/uninstall wizard and reproducible packaging script. Validate the destination and prevent writes through links or into a foreign nonempty folder. Track only installed payload files, remove obsolete managed files on update, and preserve unrelated files. Refuse an update/uninstall while the installed app is in use. Upgrade existing PowerShell installations in place.
-2. Add ownership-aware app registration cleanup and quiet registration commands. Preserve file defaults and registrations belonging to another copy. Replace the old PowerShell installation instructions and distribute setup as the normal entry point.
-3. Test real compiled setup/update/uninstall with a harmless fixture and isolated product registration. Verify shortcuts, version/location, settings/unrelated-file preservation, obsolete-file cleanup, locked/foreign destinations and legacy migration. Run registration and existing app checks, build the full installer, and inspect its embedded version and payload.
-
-Validation: all existing app checks passed, including 80 isolated registration checks and 222 native UI/playback checks. The final installer suite passed 104 assertions with Unicode paths, existing empty folders, native and legacy upgrades, locked-file refusals, failure recovery and cleanup. Packaging also compiled through Windows PowerShell 5.1. Production Museek was not installed during these tests.

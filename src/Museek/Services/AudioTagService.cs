@@ -19,6 +19,15 @@ public sealed class AudioTagService
 {
     private const int MaximumArtworkBytes = 8 * 1024 * 1024;
     private const long MaximumArtworkPixels = 32 * 1024 * 1024;
+    private const int MaximumReplacementAttempts = 4;
+    private const int UnableToRemoveReplacedHResult = unchecked((int)0x80070497);
+    private readonly Action<string, string> _replaceFile;
+
+    public AudioTagService() : this(static (temporary, path) =>
+        File.Replace(temporary, path, destinationBackupFileName: null)) { }
+
+    internal AudioTagService(Action<string, string> replaceFile)
+        => _replaceFile = replaceFile ?? throw new ArgumentNullException(nameof(replaceFile));
 
     public Task<AudioTags> ReadAsync(string path, CancellationToken cancellationToken = default)
         => Task.Run(() => ReadTags(NormalizePath(path), cancellationToken), cancellationToken);
@@ -50,7 +59,7 @@ public sealed class AudioTagService
             try
             {
                 path = NormalizePath(path);
-                await Task.Run(() => ApplyFileAsync(path, patch, artworkMime, cancellationToken))
+                await Task.Run(() => ApplyFileAsync(path, patch, artworkMime, _replaceFile, cancellationToken))
                     .ConfigureAwait(false);
                 result = new TagEditResult(path, true, null);
             }
@@ -80,13 +89,18 @@ public sealed class AudioTagService
         return tags;
     }
 
-    private static AudioTags ReadFileTags(TagLib.File file, string path)
+    private static AudioTags ReadFileTags(TagLib.File file, string path, bool includeArtwork = true)
     {
         var tag = file.Tag;
-        var pictures = tag.Pictures;
-        var cover = pictures.FirstOrDefault(p => p.Type == TagLib.PictureType.FrontCover)
-            ?? pictures.FirstOrDefault();
-        var artwork = cover?.Data.Count is > 0 and <= MaximumArtworkBytes ? cover.Data.Data.ToArray() : null;
+        byte[]? artwork = null;
+        if (includeArtwork)
+        {
+            var pictures = tag.Pictures;
+            var cover = pictures.FirstOrDefault(p => p.Type == TagLib.PictureType.FrontCover)
+                ?? pictures.FirstOrDefault();
+            // ByteVector.Data already returns an owned copy of its internal bytes.
+            artwork = cover?.Data.Count is > 0 and <= MaximumArtworkBytes ? cover.Data.Data : null;
+        }
         if (file is TagLib.Riff.File)
         {
             // RIFF INFO uses IART/IPRD in common WAV writers. TagLib instead maps
@@ -110,7 +124,7 @@ public sealed class AudioTagService
     }
 
     private static async Task ApplyFileAsync(string path, TagEditPatch patch, string? artworkMime,
-        CancellationToken token)
+        Action<string, string> replaceFile, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
         RejectSymbolicLinks(path);
@@ -166,35 +180,56 @@ public sealed class AudioTagService
             using (var staged = new FileStream(temporary, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
                 staged.Flush(flushToDisk: true);
 
-            token.ThrowIfCancellationRequested();
-            RejectSymbolicLinks(path);
-            using var current = new FileStream(path, FileMode.Open, FileAccess.Read,
-                FileShare.Read | FileShare.Delete, 65_536, FileOptions.Asynchronous | FileOptions.SequentialScan);
-            var currentInformation = GetSourceInformation(current.SafeFileHandle);
-            ValidateWritableSource(currentInformation);
-            if (!original.SameVersion(currentInformation))
-                throw new IOException("The source file changed while tags were being edited. The original was kept.");
-            var currentHash = await SHA256.HashDataAsync(current, token).ConfigureAwait(false);
-            if (!CryptographicOperations.FixedTimeEquals(originalHash, currentHash))
-                throw new IOException("The source file changed while tags were being edited. The original was kept.");
-            token.ThrowIfCancellationRequested();
-            RejectSymbolicLinks(path);
-            using (var finalHandle = File.OpenHandle(path, FileMode.Open, FileAccess.Read,
-                FileShare.Read | FileShare.Delete))
-            {
-                var finalInformation = GetSourceInformation(finalHandle);
-                ValidateWritableSource(finalInformation);
-                if (!original.SameVersion(finalInformation))
-                    throw new IOException("The source file changed before saving. The original was kept.");
-                token.ThrowIfCancellationRequested();
-                File.Replace(temporary, path, destinationBackupFileName: null);
-            }
+            await ReplaceVerifiedSourceAsync(path, temporary, original, originalHash, replaceFile, token)
+                .ConfigureAwait(false);
         }
         finally
         {
             try { File.Delete(temporary); }
             catch (IOException) { }
             catch (UnauthorizedAccessException) { }
+        }
+    }
+
+    private static async Task ReplaceVerifiedSourceAsync(string path, string temporary, SourceInformation original,
+        byte[] originalHash, Action<string, string> replaceFile, CancellationToken token)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            token.ThrowIfCancellationRequested();
+            RejectSymbolicLinks(path);
+            using (var current = new FileStream(path, FileMode.Open, FileAccess.Read,
+                FileShare.Read | FileShare.Delete, 65_536, FileOptions.Asynchronous | FileOptions.SequentialScan))
+            {
+                var currentInformation = GetSourceInformation(current.SafeFileHandle);
+                ValidateWritableSource(currentInformation);
+                if (!original.SameVersion(currentInformation))
+                    throw new IOException("The source file changed while tags were being edited. The original was kept.");
+                var currentHash = await SHA256.HashDataAsync(current, token).ConfigureAwait(false);
+                if (!CryptographicOperations.FixedTimeEquals(originalHash, currentHash))
+                    throw new IOException("The source file changed while tags were being edited. The original was kept.");
+                token.ThrowIfCancellationRequested();
+                RejectSymbolicLinks(path);
+                using (var finalHandle = File.OpenHandle(path, FileMode.Open, FileAccess.Read,
+                    FileShare.Read | FileShare.Delete))
+                {
+                    var finalInformation = GetSourceInformation(finalHandle);
+                    ValidateWritableSource(finalInformation);
+                    if (!original.SameVersion(finalInformation))
+                        throw new IOException("The source file changed before saving. The original was kept.");
+                    token.ThrowIfCancellationRequested();
+                    try { replaceFile(temporary, path); return; }
+                    catch (IOException exception) when (exception.HResult == UnableToRemoveReplacedHResult &&
+                        attempt < MaximumReplacementAttempts)
+                    {
+                        // Native1175 leaves both names intact. Other replacement
+                        // errors can move files and must never be retried here.
+                    }
+                }
+            }
+            // Release the per-attempt handles before waiting, then revalidate
+            // against the original information/hash before another replacement.
+            await Task.Delay(50, token).ConfigureAwait(false);
         }
     }
 
@@ -262,7 +297,7 @@ public sealed class AudioTagService
 
     private static void VerifyPatch(TagLib.File file, TagEditPatch patch)
     {
-        var values = ReadFileTags(file, string.Empty);
+        var values = ReadFileTags(file, string.Empty, includeArtwork: false);
         var tag = file.Tag;
         var valid = (patch.Title is null || values.Title == EmptyToNull(patch.Title))
             && (patch.Artist is null || values.Artist == Join(Split(patch.Artist)))
@@ -303,8 +338,17 @@ public sealed class AudioTagService
                 || (long)frame.PixelWidth * frame.PixelHeight > MaximumArtworkPixels)
                 throw new InvalidDataException("The cover image dimensions are too large.");
             var converted = new FormatConvertedBitmap(frame, PixelFormats.Bgra32, null, 0);
-            var stride = checked(frame.PixelWidth * 4);
-            converted.CopyPixels(new byte[checked(stride * frame.PixelHeight)], stride, 0);
+            var tileWidth = Math.Min(frame.PixelWidth, 1024);
+            var tileHeight = Math.Min(frame.PixelHeight, 64);
+            var stride = tileWidth * 4;
+            var pixels = new byte[stride * tileHeight];
+            // Decode every pixel, including partial edge tiles, without a second
+            // full-size raster allocation just to check for malformed artwork.
+            for (var y = 0; y < frame.PixelHeight; y += tileHeight)
+                for (var x = 0; x < frame.PixelWidth; x += tileWidth)
+                    converted.CopyPixels(new Int32Rect(x, y,
+                        Math.Min(tileWidth, frame.PixelWidth - x), Math.Min(tileHeight, frame.PixelHeight - y)),
+                        pixels, stride, 0);
             return mime;
         }
         catch (Exception ex) when (ex is not InvalidDataException)

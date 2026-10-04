@@ -48,13 +48,14 @@ internal static class Program
         var exitCode = 1;
         var artifacts = Path.GetFullPath(args.Length > 0 ? args[0] :
             Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "artifacts"));
+        var tagEditorOnly = args.Length > 1 && args[1] == "--tag-editor-only";
         Dispatcher.CurrentDispatcher.BeginInvoke(async () =>
         {
             try
             {
-                await RunChecksAsync(artifacts);
+                await RunChecksAsync(artifacts, tagEditorOnly);
                 exitCode = 0;
-                Console.WriteLine($"All {_checks} silent WPF UI and native playback checks passed.");
+                Console.WriteLine($"All {_checks} {(tagEditorOnly ? "tag editor" : "silent WPF UI and native playback")} checks passed.");
             }
             catch (Exception exception) { Console.Error.WriteLine(exception); }
             finally
@@ -67,7 +68,7 @@ internal static class Program
         return exitCode;
     }
 
-    private static async Task RunChecksAsync(string artifacts)
+    private static async Task RunChecksAsync(string artifacts, bool tagEditorOnly)
     {
         Directory.CreateDirectory(artifacts);
         var fixtureDirectory = Path.Combine(artifacts, "fixtures-" + Guid.NewGuid().ToString("N"));
@@ -152,6 +153,7 @@ internal static class Program
             CheckContextMenuRegistration(fixtureDirectory);
             CheckContextMenuSelection(source, covered);
             await CheckTagEditorAsync(source, covered, fixtureDirectory, artifacts);
+            if (tagEditorOnly) return;
 
             Check(window.AcceptOpenRequest(covered) && window.AcceptOpenRequest(source) &&
                 ReadField<string?>(window, "_queuedOpenPath") == source && ReadField<string?>(window, "_sourcePath") is null,
@@ -185,6 +187,7 @@ internal static class Program
             await Task.Delay(300);
             Check(Math.Abs(player.Position - pausedAt) < 0.15 && AutomationProperties.GetName(play) == "Play",
                 "paused audio stays still and exposes the play action");
+            CheckPlaybackRenderReuse(window);
             Layout(surface);
             Check(track.ActualWidth > 100, "seek track is laid out at a usable width");
             Drag(playhead, -100_000);
@@ -220,6 +223,9 @@ internal static class Program
             Check(Find<TextBlock>(window, "SelectionLabel").Text.Contains("0:02.00") &&
                 Find<TextBlock>(window, "SelectionLabel").Text.Contains("0:09.00"),
                 "thumb changes update the visible selection times");
+            Check(start.ToolTip?.ToString()?.Contains("0:00:02.000") == true &&
+                end.ToolTip?.ToString()?.Contains("0:00:09.000") == true,
+                "changing trim bounds refreshes both handle tooltips");
             Snapshot(surface, Path.Combine(artifacts, "trim.png"));
 
             // Narrow the preview to two seconds and exercise both stop and replay at its boundary.
@@ -326,6 +332,67 @@ internal static class Program
             if (Directory.Exists(fixtureDirectory) && string.Equals(Path.GetDirectoryName(fixtureDirectory),
                 artifacts, StringComparison.OrdinalIgnoreCase)) Directory.Delete(fixtureDirectory, recursive: true);
         }
+    }
+
+    private static void CheckPlaybackRenderReuse(MainWindow window)
+    {
+        var tick = typeof(MainWindow).GetMethod("Timer_Tick", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .CreateDelegate<Action<object?, EventArgs>>(window);
+        var seek = Find<RangeSeekBar>(window, "SeekBar");
+        var icon = Find<System.Windows.Shapes.Path>(window, "PlayIcon");
+        var clock = Find<TextBlock>(window, "CurrentTime");
+        var start = Find<Thumb>(seek, "StartHandle");
+        var end = Find<Thumb>(seek, "EndHandle");
+
+        tick(null, EventArgs.Empty);
+        var pausedGeometry = icon.Data;
+        var pausedClock = clock.Text;
+        var startTooltip = start.ToolTip;
+        var endTooltip = end.ToolTip;
+        for (var index = 0; index < 8; index++) tick(null, EventArgs.Empty);
+        var stablePausedIcon = ReferenceEquals(pausedGeometry, icon.Data) && icon.Data.IsFrozen;
+        var stablePausedClock = ReferenceEquals(pausedClock, clock.Text);
+        var stablePausedTooltips = ReferenceEquals(startTooltip, start.ToolTip) && ReferenceEquals(endTooltip, end.ToolTip);
+
+        var originalStoppedPosition = ReadField<double?>(window, "_stoppedPosition");
+        SetField(window, "_stoppedPosition", (double?)3.1);
+        tick(null, EventArgs.Empty);
+        var sameSecondClock = clock.Text;
+        SetField(window, "_stoppedPosition", (double?)3.8);
+        tick(null, EventArgs.Empty);
+        var stableSameSecondClock = clock.Text == "0:03" && ReferenceEquals(sameSecondClock, clock.Text);
+        SetField(window, "_stoppedPosition", (double?)4.1);
+        tick(null, EventArgs.Empty);
+        var changedSecondClock = clock.Text == "0:04" && !ReferenceEquals(sameSecondClock, clock.Text);
+        SetField(window, "_stoppedPosition", originalStoppedPosition);
+        tick(null, EventArgs.Empty);
+
+        var originalPosition = seek.Position;
+        var originalPlayhead = Canvas.GetLeft(Find<Thumb>(seek, "Playhead"));
+        startTooltip = start.ToolTip;
+        endTooltip = end.ToolTip;
+        seek.Position = 5.25;
+        var movingPositionRenders = Math.Abs(seek.Position - 5.25) < 0.01 &&
+            Canvas.GetLeft(Find<Thumb>(seek, "Playhead")) != originalPlayhead;
+        var stableMovingTooltips = ReferenceEquals(startTooltip, start.ToolTip) && ReferenceEquals(endTooltip, end.ToolTip);
+        seek.IsTrimMode = true;
+        var fill = Find<Border>(seek, "TrackFill");
+        var selectionLeft = Canvas.GetLeft(fill);
+        var selectionWidth = fill.Width;
+        startTooltip = start.ToolTip;
+        endTooltip = end.ToolTip;
+        seek.Position = 6.25;
+        var stableTrimSelection = Canvas.GetLeft(fill) == selectionLeft && fill.Width == selectionWidth &&
+            ReferenceEquals(startTooltip, start.ToolTip) && ReferenceEquals(endTooltip, end.ToolTip);
+        seek.IsTrimMode = false;
+        seek.Position = originalPosition;
+
+        Console.WriteLine($"UI reuse: paused icon={stablePausedIcon}, paused clock={stablePausedClock}, same-second clock={stableSameSecondClock}, paused trim tooltips={stablePausedTooltips}, moving trim tooltips={stableMovingTooltips}.");
+        Check(stablePausedIcon, "paused timer ticks reuse the frozen playback icon");
+        Check(stablePausedClock && stableSameSecondClock && changedSecondClock,
+            "the playback clock reuses its text within a displayed second and changes at the next second");
+        Check(stablePausedTooltips && stableMovingTooltips && stableTrimSelection && movingPositionRenders,
+            "paused ticks and a moving playhead preserve selection tooltips while updating the cursor");
     }
 
     private static async Task CheckStopAsync(MainWindow window, FrameworkElement surface)
@@ -680,6 +747,7 @@ internal static class Program
             await editor.SaveAsync();
             var afterFirst = await service.ReadAsync(first);
             var afterSecond = await service.ReadAsync(second);
+            Console.WriteLine($"Editor batch save: {Find<TextBlock>(editor, "TagStatus").Text}\nFirst: {afterFirst}\nSecond: {afterSecond}");
             Check(afterFirst.Genre == patch.Genre && afterSecond.Genre == patch.Genre &&
                 afterFirst.Year == 2026 && afterSecond.Year == 2026 &&
                 afterFirst.Title == beforeFirst.Title && afterSecond.Title == beforeSecond.Title &&
@@ -739,7 +807,81 @@ internal static class Program
                 "cancelling unsaved tag edits preserves the audio file byte-for-byte");
         }
         finally { single.Close(); }
+        await CheckTagEditorArtworkReuseAsync(covered, fixtureDirectory);
         await CheckTagEditorCloseDuringLoadAsync(first, fixtureDirectory);
+    }
+
+    private static async Task CheckTagEditorArtworkReuseAsync(string covered, string fixtureDirectory)
+    {
+        var duplicate = Path.Combine(fixtureDirectory, "same cover different title.mp3");
+        var different = Path.Combine(fixtureDirectory, "different cover.mp3");
+        File.Copy(covered, duplicate);
+        File.Copy(covered, different);
+        var service = new AudioTagService();
+        var changed = await service.ApplyAsync([duplicate], new TagEditPatch { Title = "Different title" });
+        CheckTagEditFixture(changed, "the duplicate-cover fixture changes its title without changing its cover");
+
+        var editor = new TagEditorWindow([covered, duplicate]);
+        try
+        {
+            await editor.LoadAsync();
+            var tags = ReadEditorTags(editor);
+            var sharedAfterLoad = tags.Count == 2 && tags[0].ArtworkBytes is { Length: > 0 } &&
+                ReferenceEquals(tags[0].ArtworkBytes, tags[1].ArtworkBytes);
+            Check(Find<Image>(editor, "ArtworkImage").Source is BitmapSource { PixelWidth: > 0 } &&
+                Find<TextBox>(editor, "TitleValue").Text == "" &&
+                Find<TextBox>(editor, "ArtistValue").Text == "Covered artist" &&
+                !Find<CheckBox>(editor, "TitleApply").IsChecked.GetValueOrDefault(),
+                "equal covers retain their common preview while mixed titles and common artists remain unchanged");
+            Find<CheckBox>(editor, "GenreApply").IsChecked = true;
+            Find<TextBox>(editor, "GenreValue").Text = "Shared cover check";
+            await editor.SaveAsync();
+            tags = ReadEditorTags(editor);
+            var sharedAfterSave = tags.Count == 2 && ReferenceEquals(tags[0].ArtworkBytes, tags[1].ArtworkBytes);
+            Check(tags.All(tag => tag.Genre == "Shared cover check" && tag.Artist == "Covered artist") &&
+                tags[0].Title == "Covered UI fixture" && tags[1].Title == "Different title" &&
+                Find<Image>(editor, "ArtworkImage").Source is BitmapSource { PixelWidth: > 0 },
+                "saving a common scalar refreshes equal artwork without flattening mixed titles");
+            Console.WriteLine($"Editor cover reuse: load={sharedAfterLoad}, refreshed save={sharedAfterSave}.");
+            Check(sharedAfterLoad && sharedAfterSave,
+                "an editor retains one artwork buffer for equal covers after loading and saving");
+        }
+        finally { editor.Close(); }
+
+        var alternateCover = Path.Combine(fixtureDirectory, "alternate cover.png");
+        await RunFfmpegAsync("-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+            "color=c=0xa84c23:s=64x64:d=1", "-frames:v", "1", "-pix_fmt", "rgb24", "-update", "1", "-y", alternateCover);
+        changed = await service.ApplyAsync([different], new TagEditPatch
+        {
+            ArtworkAction = ArtworkAction.Replace, ArtworkBytes = await File.ReadAllBytesAsync(alternateCover)
+        });
+        CheckTagEditFixture(changed, "the different-cover fixture receives a distinct valid cover");
+        var mixed = new TagEditorWindow([covered, duplicate, different]);
+        try
+        {
+            await mixed.LoadAsync();
+            var tags = ReadEditorTags(mixed);
+            Check(tags.Count == 3 && tags.All(tag => tag.ArtworkBytes is { Length: > 0 }) &&
+                ReferenceEquals(tags[0].ArtworkBytes, tags[1].ArtworkBytes) &&
+                !ReferenceEquals(tags[0].ArtworkBytes, tags[2].ArtworkBytes) &&
+                !tags[0].ArtworkBytes!.SequenceEqual(tags[2].ArtworkBytes!) &&
+                Find<Image>(mixed, "ArtworkImage").Source is null &&
+                Find<TextBlock>(mixed, "ArtworkPlaceholder").Text == "Different artwork",
+                "exact cover reuse preserves unequal cover buffers and the mixed-artwork preview");
+        }
+        finally { mixed.Close(); }
+    }
+
+    private static IReadOnlyList<AudioTags> ReadEditorTags(TagEditorWindow editor)
+        => (IReadOnlyList<AudioTags>)(typeof(TagEditorWindow).GetField("_tags", BindingFlags.NonPublic | BindingFlags.Instance)
+            ?.GetValue(editor) ?? throw new Exception("TagEditorWindow tags were not found."));
+
+    private static void CheckTagEditFixture(TagEditBatchResult batch, string description)
+    {
+        var succeeded = batch.Files.All(result => result.Success);
+        Check(succeeded, succeeded ? description :
+            $"{description} (Cancelled={batch.Cancelled}; " +
+            string.Join("; ", batch.Files.Select(result => $"{result.Path}: Success={result.Success}, Error={result.Error ?? "<none>"}")) + ")");
     }
 
     private static async Task CheckTagEditorCloseDuringLoadAsync(string source, string fixtureDirectory)
