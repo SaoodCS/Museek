@@ -6,6 +6,8 @@ Run on Windows x64 with .NET 10 and FFmpeg/ffprobe available:
 
 The harness loads the production WPF resources and uses real VLC playback and FFmpeg export. It exercises Unicode file loading, autoplay, pause, seek, EOF replay, trim handles, preview bounds, cancellation, damaged files, and closing during an active export. It also checks the simplified layout, embedded MP3 artwork, and artist/album lines beneath the title. Tagged, partially tagged, and metadata-free fixtures verify that changing files or errors clear old artwork and metadata, while trim and artwork loading preserve the current song's information. Its audio fixtures are silent and its volume is zero.
 
+Folder navigation checks use a separate folder of tagged silent WAVs whose filenames disagree with their metadata. They verify all four Sort By choices and their visible exclusive ticks, default Title selection, native autoplay after Next and Previous, filename fallback, missing metadata at the end, disabled boundaries, no subfolder traversal, and hidden navigation buttons during trim. They also check empty and single-song states, refresh neighbors after a sibling is added while Museek is inactive, and preserve the existing EOF behavior.
+
 With `CI=true`, the harness uses VLC's dummy audio output so playback checks can run without an audio device. Decoding, playback timing, pause, seek and Stop still use VLC. Normal local runs use the default audio output; the production app always uses the default output.
 
 The window stays unshown. Rendered client-content snapshots are saved as `artifacts/normal.png`, `artifacts/trim.png`, and `artifacts/artwork.png` beside this project. Their size follows the production window dimensions, with 31 pixels reserved for its title bar. An optional command-line argument chooses the artifacts directory. Test fixtures are removed after each run.
@@ -13,3 +15,5 @@ The window stays unshown. Rendered client-content snapshots are saved as `artifa
 Save-file dialogs and Windows default-app registration require separate interactive checks; this harness never invokes them.
 
 For a focused tag-editor run, pass an artifacts directory followed by `--tag-editor-only`. Failed fixture saves include each file's error so intermittent native replacement failures can be diagnosed.
+
+For focused folder navigation checks, pass an artifacts directory followed by `--navigation-only`. Additional rendered snapshots include `sort-by-menu.png`, each selected Sort By choice, and `navigation-trim.png`.

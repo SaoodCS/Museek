@@ -8,6 +8,7 @@ A simple audio player, trimmer and tag editor for **Windows 11 x64**.
 - Open audio from File Explorer, drag files into Museek, or press **Ctrl+O**.
 - Display the song title, artist, album and embedded album artwork.
 - Play/pause, adjust volume and seek through a song. **Stop** returns to the song start or the selected trim start.
+- Use **Previous track** and **Next track** to play audio in the current file's folder. Choose alphabetical **Sort By → Title, Artist, Album or Genre**; **Title** is selected by default. Navigation stops at the folder's first or last track, and the buttons are hidden while trimming.
 - Trim a selected range and save a separate WAV, MP3, FLAC, M4A, OGG or Opus copy.
 - Choose Museek as your default audio app through **Tools → Choose Museek as default…**.
 - Enable **Tools → Single-window mode** to reuse the current player when opening another file.

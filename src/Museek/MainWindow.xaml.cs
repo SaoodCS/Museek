@@ -74,7 +74,12 @@ public partial class MainWindow : Window
         if (!string.IsNullOrWhiteSpace(path)) await OpenAsync(path);
     }
 
-    private void Window_Activated(object? sender, EventArgs e) => RefreshSingleWindowMode();
+    private void Window_Activated(object? sender, EventArgs e)
+    {
+        RefreshSingleWindowMode();
+        if (_sourcePath is not null && !_loading && !_exporting && !_closing && !_sorting)
+            _activeFolder = RefreshFolderTracksAsync();
+    }
 
     private void Window_PreviewKeyDown(object sender, KeyEventArgs e)
     {
@@ -82,7 +87,7 @@ public partial class MainWindow : Window
         {
             OpenAudioFile(); e.Handled = true;
         }
-        else if (e.Key == Key.Escape && _trimMode && !HelpMenu.IsSubmenuOpen && !ToolsMenu.IsSubmenuOpen && !MenuBar.IsKeyboardFocusWithin)
+        else if (e.Key == Key.Escape && _trimMode && !HelpMenu.IsSubmenuOpen && !ToolsMenu.IsSubmenuOpen && !SortByMenu.IsSubmenuOpen && !MenuBar.IsKeyboardFocusWithin)
         {
             CancelButton_Click(CancelButton, new RoutedEventArgs()); e.Handled = true;
         }
@@ -101,9 +106,10 @@ public partial class MainWindow : Window
         IsEnabled = false;
         _timer.Stop();
         _loadCancellation?.Cancel();
+        _folderCancellation?.Cancel();
         _saveCancellation?.Cancel();
         // Let FFmpeg finish its cancellation cleanup before ending the process.
-        try { await Task.WhenAll(_activeProbe ?? Task.CompletedTask, _activeExport ?? Task.CompletedTask, _activeArtwork ?? Task.CompletedTask); }
+        try { await Task.WhenAll(_activeProbe ?? Task.CompletedTask, _activeExport ?? Task.CompletedTask, _activeArtwork ?? Task.CompletedTask, _activeFolder ?? Task.CompletedTask); }
         catch (Exception) { /* The load/save handler reports errors while the window is open. */ }
         _player.PlaybackError -= Player_PlaybackError;
         _player.Dispose();

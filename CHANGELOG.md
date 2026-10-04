@@ -2,6 +2,13 @@
 
 Version notes are maintained alongside the code. See [GitHub Releases](https://github.com/SaoodCS/Museek/releases) for published versions and installers.
 
+## 1.3.0
+
+- Added a checked **Sort By** menu for Title, Artist, Album and Genre, with Title selected by default.
+- Added Previous track and Next track buttons for the current audio file's folder, following the selected sort order. The buttons are hidden while trimming.
+
+See [the full version notes](releases/1.3.0.md).
+
 ## 1.2.1
 
 - Matched the app and installer icon to the green used by the in-app logo.

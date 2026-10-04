@@ -49,13 +49,14 @@ internal static class Program
         var artifacts = Path.GetFullPath(args.Length > 0 ? args[0] :
             Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "artifacts"));
         var tagEditorOnly = args.Length > 1 && args[1] == "--tag-editor-only";
+        var navigationOnly = args.Length > 1 && args[1] == "--navigation-only";
         Dispatcher.CurrentDispatcher.BeginInvoke(async () =>
         {
             try
             {
-                await RunChecksAsync(artifacts, tagEditorOnly);
+                await RunChecksAsync(artifacts, tagEditorOnly, navigationOnly);
                 exitCode = 0;
-                Console.WriteLine($"All {_checks} {(tagEditorOnly ? "tag editor" : "silent WPF UI and native playback")} checks passed.");
+                Console.WriteLine($"All {_checks} {(tagEditorOnly ? "tag editor" : navigationOnly ? "folder navigation" : "silent WPF UI and native playback")} checks passed.");
             }
             catch (Exception exception) { Console.Error.WriteLine(exception); }
             finally
@@ -68,7 +69,7 @@ internal static class Program
         return exitCode;
     }
 
-    private static async Task RunChecksAsync(string artifacts, bool tagEditorOnly)
+    private static async Task RunChecksAsync(string artifacts, bool tagEditorOnly, bool navigationOnly)
     {
         Directory.CreateDirectory(artifacts);
         var fixtureDirectory = Path.Combine(artifacts, "fixtures-" + Guid.NewGuid().ToString("N"));
@@ -76,6 +77,11 @@ internal static class Program
         MainWindow? window = null;
         try
         {
+            if (navigationOnly)
+            {
+                await CheckFolderNavigationAsync(fixtureDirectory, artifacts);
+                return;
+            }
             var source = Path.Combine(fixtureDirectory, "音楽 sample ' & audio.wav");
             const string title = "Museek UI fixture — 音楽";
             // The fixture is silent as well as muted: a regression in volume cannot make noise.
@@ -141,6 +147,9 @@ internal static class Program
             var start = Find<Thumb>(seek, "StartHandle");
             var end = Find<Thumb>(seek, "EndHandle");
             var track = Find<Canvas>(seek, "Surface");
+            Check(window.FindName("SortByMenu") is MenuItem &&
+                window.FindName("PreviousTrackButton") is Button && window.FindName("NextTrackButton") is Button,
+                "the player provides a top Sort By menu and previous/next track buttons");
             Check(window.FindName("OpenButton") is null && window.FindName("FileSubtitle") is null,
                 "the simplified player omits the Open file button and filename subtitle");
             Check(window.FindName("ModeLabel") is null,
@@ -266,6 +275,8 @@ internal static class Program
             await WaitUntilAsync(() => player.HasEnded && AutomationProperties.GetName(play) == "Play",
                 "seeking to the file end reaches EOF and exposes replay",
                 () => PlaybackState(window));
+            Check(ReadField<string?>(window, "_sourcePath") == source,
+                "reaching EOF keeps the current song instead of advancing within its folder");
             Drag(playhead, -(track.ActualWidth - 24) / 2);
             await WaitUntilAsync(() => player.IsPlaying && player.Position >= 5.9 && player.Position < 6.8,
                 "seeking after EOF restarts native playback at the requested midpoint");
@@ -310,6 +321,7 @@ internal static class Program
             CheckErrorState(window, "corrupt audio shows an error and disables stale playback controls");
             CheckArtworkPlaceholder(window, "a corrupt file clears the previous song's artwork");
             CheckSongMetadata(window, null, null, "a corrupt file clears the previous artist and album");
+            await CheckFolderNavigationAsync(fixtureDirectory, artifacts);
             var finalSourceBytes = await File.ReadAllBytesAsync(source);
             Check(originalHash.SequenceEqual(SHA256.HashData(finalSourceBytes)),
                 "playback, trimming, cancellation, and errors leave the original file unchanged");
@@ -331,6 +343,177 @@ internal static class Program
             // This unique child directory contains only fixtures created by this runner.
             if (Directory.Exists(fixtureDirectory) && string.Equals(Path.GetDirectoryName(fixtureDirectory),
                 artifacts, StringComparison.OrdinalIgnoreCase)) Directory.Delete(fixtureDirectory, recursive: true);
+        }
+    }
+
+    private static async Task CheckFolderNavigationAsync(string fixtureDirectory, string artifacts)
+    {
+        // Every navigation fixture lives in its own folder, separate from other playback checks.
+        var directory = Path.Combine(fixtureDirectory, "folder navigation");
+        Directory.CreateDirectory(directory);
+        async Task<string> CreateTrackAsync(string name, string? title, string? artist, string? album, string? genre,
+            string? targetDirectory = null)
+        {
+            var path = Path.Combine(targetDirectory ?? directory, name + ".wav");
+            var arguments = new List<string> { "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                "anullsrc=r=48000:cl=mono", "-t", "12", "-c:a", "pcm_s16le" };
+            foreach (var (key, value) in new[] { ("title", title), ("artist", artist), ("album", album), ("genre", genre) })
+                if (value is not null) arguments.AddRange(["-metadata", key + "=" + value]);
+            arguments.AddRange(["-y", path]);
+            await RunFfmpegAsync(arguments.ToArray());
+            return path;
+        }
+
+        // Filenames deliberately disagree with tags, and each field gives a different order.
+        var alpha = await CreateTrackAsync("zebra filename", "Alpha", "Charlie", "Bravo", "Delta");
+        var bravo = await CreateTrackAsync("alpha filename", "Bravo", "Alpha", "Delta", "Charlie");
+        var charlie = await CreateTrackAsync("middle filename", "Charlie", "Bravo", "Alpha", "Bravo");
+        var fallback = await CreateTrackAsync("fallback", null, null, null, null);
+        var nestedDirectory = Path.Combine(directory, "child folder");
+        Directory.CreateDirectory(nestedDirectory);
+        await CreateTrackAsync("nested track", "Aardvark", "Aardvark", "Aardvark", "Aardvark", nestedDirectory);
+        await File.WriteAllTextAsync(Path.Combine(directory, "Aardvark.txt"), "Unsupported sibling file.");
+        var singleDirectory = Path.Combine(fixtureDirectory, "single track folder");
+        Directory.CreateDirectory(singleDirectory);
+        var single = await CreateTrackAsync("only track", "Only track", null, null, null, singleDirectory);
+
+        var settings = new AppSettingsService(Path.Combine(directory, "isolated navigation settings.json"));
+        var window = new MainWindow(settings: settings, editTagsContextMenuRegistration: _ => { },
+            audioPlayer: new AudioPlayerService(useDummyAudioOutput:
+                string.Equals(Environment.GetEnvironmentVariable("CI"), "true", StringComparison.OrdinalIgnoreCase)));
+        try
+        {
+            Find<Slider>(window, "VolumeSlider").Value = 0;
+            var player = ReadField<AudioPlayerService>(window, "_player");
+            var previous = Find<Button>(window, "PreviousTrackButton");
+            var next = Find<Button>(window, "NextTrackButton");
+            var content = (UIElement)window.Content;
+            window.Content = null;
+            var surface = new Border { Child = content, Background = window.Background,
+                Width = window.Width, Height = Math.Max(1, window.Height - 31) };
+            TextElement.SetFontFamily(surface, window.FontFamily);
+            TextElement.SetFontSize(surface, window.FontSize);
+            TextElement.SetForeground(surface, window.Foreground);
+            Layout(surface);
+            var menu = Find<MenuItem>(window, "SortByMenu");
+            var choices = new[] { "Title", "Artist", "Album", "Genre" }
+                .Select(name => Find<MenuItem>(window, "Sort" + name + "MenuItem")).ToArray();
+            Check(Find<Menu>(window, "MenuBar").Items.Contains(menu) &&
+                (menu.Header?.ToString() ?? "").Replace("_", "") == "Sort By" &&
+                menu.Items.OfType<MenuItem>().SequenceEqual(choices) &&
+                choices.All(choice => choice.IsCheckable) &&
+                choices.Select(choice => choice.Header?.ToString()).SequenceEqual(["Title", "Artist", "Album", "Genre"]),
+                "Sort By is a top menu with exactly Title, Artist, Album, and Genre choices");
+            Check(choices[0].IsChecked && choices.Count(choice => choice.IsChecked) == 1,
+                "a fresh window defaults to only Title checked");
+            Check(!previous.IsEnabled && !next.IsEnabled,
+                "an empty player disables both folder navigation buttons");
+            var menuBody = LayoutClosedMenu(menu);
+            foreach (var choice in choices) choice.ApplyTemplate();
+            var titleGlyph = choices[0].Template.FindName("CheckGlyph", choices[0]) as System.Windows.Shapes.Path
+                ?? throw new Exception("Sort By's visible checkmark was not found.");
+            Check(titleGlyph.Visibility == Visibility.Visible && HasRenderedInk(titleGlyph),
+                "the default Title selection renders a visible tick");
+            Snapshot(menuBody, Path.Combine(artifacts, "sort-by-menu.png"), layout: false);
+
+            async Task CheckPlayingTrackAsync(string expectedPath, string expectedTitle, string description)
+            {
+                await WaitUntilAsync(() => ReadField<string?>(window, "_sourcePath") == expectedPath &&
+                    !ReadField<bool>(window, "_loading") && player.IsPlaying && player.Position > 0.08,
+                    description, () => PlaybackState(window));
+                Check(Find<TextBlock>(window, "SongTitle").Text == expectedTitle && window.Title.Contains(expectedTitle),
+                    description + " updates the displayed song and window title");
+            }
+
+            async Task SelectSortAsync(string name)
+            {
+                var selected = Find<MenuItem>(window, "Sort" + name + "MenuItem");
+                Click(selected);
+                Check(selected.IsChecked && choices.Count(choice => choice.IsChecked) == 1,
+                    "selecting " + name + " checks only that option");
+                Click(selected);
+                Check(selected.IsChecked && choices.Count(choice => choice.IsChecked) == 1,
+                    "selecting " + name + " again keeps its exclusive tick");
+                await WaitUntilAsync(() => previous.IsEnabled && next.IsEnabled,
+                    name + " sorting enables both neighbors for its middle track");
+                menuBody = LayoutClosedMenu(menu);
+                var glyph = selected.Template.FindName("CheckGlyph", selected) as System.Windows.Shapes.Path;
+                Check(glyph is not null && glyph.Visibility == Visibility.Visible && HasRenderedInk(glyph) &&
+                    choices.Where(choice => !ReferenceEquals(choice, selected)).All(choice =>
+                        (choice.Template.FindName("CheckGlyph", choice) as System.Windows.Shapes.Path)?.Visibility != Visibility.Visible),
+                    name + " renders one checkmark beside the selected option");
+                Snapshot(menuBody, Path.Combine(artifacts, "sort-by-" + name.ToLowerInvariant() + ".png"), layout: false);
+            }
+
+            foreach (var (sort, middlePath, middleTitle, nextPath, nextTitle, previousPath, previousTitle) in new[]
+            {
+                ("Title", bravo, "Bravo", charlie, "Charlie", alpha, "Alpha"),
+                ("Artist", charlie, "Charlie", alpha, "Alpha", bravo, "Bravo"),
+                ("Album", alpha, "Alpha", bravo, "Bravo", charlie, "Charlie"),
+                ("Genre", bravo, "Bravo", alpha, "Alpha", charlie, "Charlie")
+            })
+            {
+                var opening = OpenAsync(window, middlePath);
+                Check(!previous.IsEnabled && !next.IsEnabled, "loading disables both folder navigation buttons");
+                await opening;
+                await CheckPlayingTrackAsync(middlePath, middleTitle, sort + " setup opens its middle track");
+                await SelectSortAsync(sort);
+                Click(next);
+                await CheckPlayingTrackAsync(nextPath, nextTitle, sort + " Next plays the next tagged sibling");
+                await WaitUntilAsync(() => previous.IsEnabled, sort + " next track has an available previous neighbor");
+                Click(previous);
+                await CheckPlayingTrackAsync(middlePath, middleTitle, sort + " Previous returns to the middle track");
+                await WaitUntilAsync(() => previous.IsEnabled, sort + " middle track restores its previous neighbor");
+                Click(previous);
+                await CheckPlayingTrackAsync(previousPath, previousTitle, sort + " Previous follows the selected tag order");
+                await WaitUntilAsync(() => !previous.IsEnabled && next.IsEnabled,
+                    sort + " first track disables Previous without wrapping or including nested/unsupported files");
+            }
+
+            await OpenAsync(window, bravo);
+            await SelectSortAsync("Title");
+            Click(Find<Button>(window, "TrimButton"));
+            Check(previous.Visibility == Visibility.Collapsed && next.Visibility == Visibility.Collapsed,
+                "trim mode collapses both folder navigation buttons");
+            Layout(surface);
+            Snapshot(surface, Path.Combine(artifacts, "navigation-trim.png"), layout: false);
+            Click(Find<Button>(window, "CancelButton"));
+            Check(previous.Visibility == Visibility.Visible && next.Visibility == Visibility.Visible,
+                "cancelling trim restores both folder navigation buttons");
+            await WaitUntilAsync(() => previous.IsEnabled && next.IsEnabled,
+                "cancelling trim restores the current track's available neighbors");
+            await OpenAsync(window, charlie);
+            await WaitUntilAsync(() => next.IsEnabled, "Title sorting exposes the untagged filename fallback as next");
+            Click(next);
+            await CheckPlayingTrackAsync(fallback, "fallback", "Next reaches the track with a filename title fallback");
+            await WaitUntilAsync(() => previous.IsEnabled && !next.IsEnabled,
+                "the final track disables Next without wrapping");
+            foreach (var name in new[] { "Artist", "Album", "Genre" })
+            {
+                Click(Find<MenuItem>(window, "Sort" + name + "MenuItem"));
+                await WaitUntilAsync(() => previous.IsEnabled && !next.IsEnabled,
+                    name + " sorting places missing metadata after tagged tracks");
+            }
+            await OpenAsync(window, single);
+            await CheckPlayingTrackAsync(single, "Only track", "a folder containing one song still autoplays it");
+            await Task.Delay(100);
+            Check(!previous.IsEnabled && !next.IsEnabled,
+                "a folder with one supported audio file disables both neighbor buttons");
+            var added = await CreateTrackAsync("new sibling", "Zulu track", null, null, null, singleDirectory);
+            InvokeWindowMethod(window, "Window_Activated", window, EventArgs.Empty);
+            await WaitUntilAsync(() => !previous.IsEnabled && next.IsEnabled,
+                "returning to Museek refreshes neighbors after a sibling is added to the current folder");
+            Click(next);
+            await CheckPlayingTrackAsync(added, "Zulu track", "Next plays a sibling added while Museek was inactive");
+            Check(!window.IsVisible && new WindowInteropHelper(window).Handle == IntPtr.Zero,
+                "folder navigation checks remain muted and create no window handle");
+        }
+        finally
+        {
+            var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            window.Closed += (_, _) => closed.TrySetResult();
+            window.Close();
+            await closed.Task.WaitAsync(TimeSpan.FromSeconds(8));
         }
     }
 
@@ -532,8 +715,8 @@ internal static class Program
         var helpEntries = help.Items.OfType<MenuItem>().ToArray();
         var singleWindow = Find<MenuItem>(window, "SingleWindowModeMenuItem");
         var editTags = Find<MenuItem>(window, "EditTagsContextMenuItem");
-        Check(menu.Items.Count == 2 && ReferenceEquals(menu.Items[0], tools) &&
-            ReferenceEquals(menu.Items[1], help) &&
+        Check(menu.Items.Count == 3 && menu.Items.Contains(Find<MenuItem>(window, "SortByMenu")) &&
+            menu.Items.IndexOf(tools) < menu.Items.IndexOf(help) &&
             (tools.Header?.ToString() ?? "").Replace("_", "") == "Tools" &&
             toolsEntries.Length == 3 && toolsEntries[0].Header?.ToString() == "Choose Museek as default…" &&
             ReferenceEquals(toolsEntries[1], singleWindow) && singleWindow.IsCheckable &&
@@ -1151,6 +1334,13 @@ internal static class Program
             ?? throw new Exception("MainWindow field not found: " + name)).SetValue(window, value);
 
     private static void Click(Button button) => button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent, button));
+
+    private static void Click(MenuItem item)
+    {
+        // WPF toggles a checkable item before routing Click to the application handler.
+        if (item.IsCheckable) item.IsChecked = !item.IsChecked;
+        item.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent, item));
+    }
 
     private static void Drag(Thumb thumb, double pixels)
         => thumb.RaiseEvent(new DragDeltaEventArgs(pixels, 0) { RoutedEvent = Thumb.DragDeltaEvent });

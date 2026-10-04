@@ -38,6 +38,8 @@ public partial class MainWindow
     {
         if (_exporting || _closing) return;
         _loadCancellation?.Cancel();
+        _folderCancellation?.Cancel();
+        _folderTracks = [];
         using var cancellation = new CancellationTokenSource();
         _loadCancellation = cancellation;
         _player.Stop();
@@ -78,6 +80,7 @@ public partial class MainWindow
             _wantsPlayback = true;
             _loading = false;
             UpdateControls();
+            _activeFolder = RefreshFolderTracksAsync();
             var artworkBytes = await artwork;
             cancellation.Token.ThrowIfCancellationRequested();
             if (!_closing) SetArtwork(artworkBytes);
@@ -160,6 +163,7 @@ public partial class MainWindow
             {
                 SetTrimMode(false);
                 StatusText.Text = $"Saved {Path.GetFileName(dialog.FileName)}. Your original is unchanged.";
+                _activeFolder = RefreshFolderTracksAsync();
             }
         }
         catch (OperationCanceledException) { if (!_closing) StatusText.Text = "Save stopped. Adjust the selection or try again."; }

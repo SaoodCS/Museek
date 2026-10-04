@@ -13,6 +13,7 @@ public partial class MainWindow
         PlayButton.IsEnabled = StopButton.IsEnabled = SeekBar.IsEnabled = TrimButton.IsEnabled = ready;
         SaveButton.IsEnabled = ready && SeekBar.SelectionEnd > SeekBar.SelectionStart;
         CancelButton.Content = _exporting ? "Stop saving" : "Cancel";
+        UpdateTrackControls();
         UpdatePlayIcon();
     }
 
@@ -123,6 +124,7 @@ public partial class MainWindow
         _trimMode = active;
         SeekBar.IsTrimMode = active;
         TrimButton.Visibility = active ? Visibility.Collapsed : Visibility.Visible;
+        PreviousTrackButton.Visibility = NextTrackButton.Visibility = active ? Visibility.Collapsed : Visibility.Visible;
         SaveButton.Visibility = CancelButton.Visibility = SelectionLabel.Visibility = active ? Visibility.Visible : Visibility.Collapsed;
         if (active) UpdateSelectionLabel();
     }
