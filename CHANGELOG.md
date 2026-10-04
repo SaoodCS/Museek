@@ -2,6 +2,12 @@
 
 Version notes are maintained alongside the code. See [GitHub Releases](https://github.com/SaoodCS/Museek/releases) for published versions and installers.
 
+## 1.2.1
+
+- Matched the app and installer icon to the green used by the in-app logo.
+
+See [the full version notes](releases/1.2.1.md).
+
 ## 1.2.0
 
 - Reduced playback and seeking allocations, bounded large-artwork validation buffers, and reused identical artwork in batch tag editing.
