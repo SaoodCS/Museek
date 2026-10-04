@@ -13,6 +13,7 @@ using System.Windows.Documents;
 using System.Windows.Interop;
 using System.Windows.Markup;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using System.Xml.Linq;
@@ -307,6 +308,7 @@ internal static class Program
             await CheckQueuedEofTrimAsync(window, surface);
             await CheckQueuedOpenRequestsAsync(window, source, untagged, covered);
             await CheckArtworkChangesAsync(window, source, untagged, artistOnly, albumOnly, covered, surface, artifacts);
+            await CheckTrackTransitionsAsync(window, source, untagged, covered, surface, fixtureDirectory);
             await OpenAsync(window, Path.Combine(fixtureDirectory, "missing audio.wav"));
             CheckErrorState(window, "missing audio shows an error and disables stale playback controls");
             CheckArtworkPlaceholder(window, "a missing file clears the previous song's artwork");
@@ -395,6 +397,7 @@ internal static class Program
             TextElement.SetFontSize(surface, window.FontSize);
             TextElement.SetForeground(surface, window.Foreground);
             Layout(surface);
+            CheckCenteredPlaybackControls(window, surface, trimMode: false);
             var menu = Find<MenuItem>(window, "SortByMenu");
             var choices = new[] { "Title", "Artist", "Album", "Genre" }
                 .Select(name => Find<MenuItem>(window, "Sort" + name + "MenuItem")).ToArray();
@@ -458,10 +461,24 @@ internal static class Program
                 await opening;
                 await CheckPlayingTrackAsync(middlePath, middleTitle, sort + " setup opens its middle track");
                 await SelectSortAsync(sort);
+                var previousArtist = Find<TextBlock>(window, "ArtistName").Text;
+                var previousAlbum = Find<TextBlock>(window, "AlbumName").Text;
+                var previousArtwork = Find<Image>(window, "AlbumArtwork").Source;
                 Click(next);
+                await WaitUntilAsync(() => ReadField<bool>(window, "_loading"), sort + " Next begins reading the new track",
+                    pollingInterval: TimeSpan.FromMilliseconds(1));
+                Check(Find<TextBlock>(window, "SongTitle").Text == middleTitle &&
+                    Find<TextBlock>(window, "ArtistName").Text == previousArtist &&
+                    Find<TextBlock>(window, "AlbumName").Text == previousAlbum &&
+                    ReferenceEquals(Find<Image>(window, "AlbumArtwork").Source, previousArtwork),
+                    sort + " Next keeps the previous presentation visible while reading the new track");
                 await CheckPlayingTrackAsync(nextPath, nextTitle, sort + " Next plays the next tagged sibling");
                 await WaitUntilAsync(() => previous.IsEnabled, sort + " next track has an available previous neighbor");
                 Click(previous);
+                await WaitUntilAsync(() => ReadField<bool>(window, "_loading"), sort + " Previous begins reading the new track",
+                    pollingInterval: TimeSpan.FromMilliseconds(1));
+                Check(Find<TextBlock>(window, "SongTitle").Text == nextTitle,
+                    sort + " Previous keeps the previous title visible while reading the new track");
                 await CheckPlayingTrackAsync(middlePath, middleTitle, sort + " Previous returns to the middle track");
                 await WaitUntilAsync(() => previous.IsEnabled, sort + " middle track restores its previous neighbor");
                 Click(previous);
@@ -476,6 +493,7 @@ internal static class Program
             Check(previous.Visibility == Visibility.Collapsed && next.Visibility == Visibility.Collapsed,
                 "trim mode collapses both folder navigation buttons");
             Layout(surface);
+            CheckCenteredPlaybackControls(window, surface, trimMode: true);
             Snapshot(surface, Path.Combine(artifacts, "navigation-trim.png"), layout: false);
             Click(Find<Button>(window, "CancelButton"));
             Check(previous.Visibility == Visibility.Visible && next.Visibility == Visibility.Visible,
@@ -515,6 +533,36 @@ internal static class Program
             window.Close();
             await closed.Task.WaitAsync(TimeSpan.FromSeconds(8));
         }
+    }
+
+    private static void CheckCenteredPlaybackControls(MainWindow window, FrameworkElement surface, bool trimMode)
+    {
+        var originalWidth = surface.Width;
+        var play = Find<Button>(window, "PlayButton");
+        var previous = Find<Button>(window, "PreviousTrackButton");
+        var next = Find<Button>(window, "NextTrackButton");
+        var stop = Find<Button>(window, "StopButton");
+        foreach (var width in new[] { window.MinWidth, window.Width, 900d }.Distinct())
+        {
+            surface.Width = width;
+            Layout(surface);
+            var playLeft = play.TranslatePoint(new Point(), surface).X;
+            var playRight = playLeft + play.ActualWidth;
+            var stopLeft = stop.TranslatePoint(new Point(), surface).X;
+            Check(Math.Abs((playLeft + playRight) / 2 - surface.ActualWidth / 2) < 0.5,
+                $"{(trimMode ? "trim" : "normal")} playback centers Play within the app at width {width}");
+            Check(stopLeft >= playRight && stopLeft + stop.ActualWidth <= surface.ActualWidth,
+                $"Stop stays to the right of Play without clipping at width {width}");
+            if (!trimMode)
+            {
+                var previousRight = previous.TranslatePoint(new Point(), surface).X + previous.ActualWidth;
+                var nextLeft = next.TranslatePoint(new Point(), surface).X;
+                Check(previousRight <= playLeft && nextLeft >= playRight && stopLeft >= nextLeft + next.ActualWidth,
+                    $"Previous, Play, Next, and Stop stay in order without overlap at width {width}");
+            }
+        }
+        surface.Width = originalWidth;
+        Layout(surface);
     }
 
     private static void CheckPlaybackRenderReuse(MainWindow window)
@@ -1210,25 +1258,248 @@ internal static class Program
         var clearing = OpenAsync(window, untagged);
         CheckSongMetadata(window, null, null, "opening metadata-free audio immediately clears stale names");
         await clearing;
-        CheckSongMetadata(window, null, null, "audio without artist or album keeps both lines empty and collapsed");
+        CheckSongMetadata(window, null, null, "audio without artist or album keeps both reserved lines empty and hidden");
+        Layout(surface);
+        var metadataFreePlayTop = Find<Button>(window, "PlayButton").TranslatePoint(new Point(), surface).Y;
         await OpenAsync(window, artistOnly);
-        CheckSongMetadata(window, "Artist only", null, "artist-only audio displays its artist and collapses the album line");
+        CheckSongMetadata(window, "Artist only", null, "artist-only audio displays its artist and reserves the missing album line");
+        Layout(surface);
+        Check(Math.Abs(Find<Button>(window, "PlayButton").TranslatePoint(new Point(), surface).Y - metadataFreePlayTop) < 0.5,
+            "adding an artist line keeps the playback controls in the same position");
         await OpenAsync(window, albumOnly);
-        CheckSongMetadata(window, null, "Album only", "album-only audio displays its album and collapses the artist line");
+        CheckSongMetadata(window, null, "Album only", "album-only audio displays its album and reserves the missing artist line");
+        Layout(surface);
+        Check(Math.Abs(Find<Button>(window, "PlayButton").TranslatePoint(new Point(), surface).Y - metadataFreePlayTop) < 0.5,
+            "changing from artist-only to album-only metadata keeps the playback controls in the same position");
 
         // Leave real artwork loaded so the subsequent file-error checks can catch stale covers.
         await OpenAsync(window, covered);
         await WaitForArtworkAsync(window, "returning to a covered song restores its embedded artwork");
         CheckSongMetadata(window, "Covered artist", "Covered album",
             "returning to covered audio restores its artist and album");
+        Layout(surface);
+        Check(Math.Abs(Find<Button>(window, "PlayButton").TranslatePoint(new Point(), surface).Y - metadataFreePlayTop) < 0.5,
+            "complete metadata and artwork keep the playback controls in the same position as untagged audio");
+    }
+
+    private static async Task CheckTrackTransitionsAsync(MainWindow window, string source, string untagged,
+        string covered, FrameworkElement surface, string fixtureDirectory)
+    {
+        var presentation = Find<FrameworkElement>(window, "TrackPresentation");
+        var translation = Find<TranslateTransform>(window, "TrackTranslation");
+        var title = Find<TextBlock>(window, "SongTitle");
+        var artist = Find<TextBlock>(window, "ArtistName");
+        var album = Find<TextBlock>(window, "AlbumName");
+        var image = Find<Image>(window, "AlbumArtwork");
+        var placeholder = Find<Border>(window, "ArtworkPlaceholder");
+        var play = Find<Button>(window, "PlayButton");
+        var player = ReadField<AudioPlayerService>(window, "_player");
+        Check(presentation.IsAncestorOf(title) && presentation.IsAncestorOf(image) &&
+            presentation.IsAncestorOf(Find<StackPanel>(window, "TrackDetails")) && !presentation.IsAncestorOf(play) &&
+            ReferenceEquals(presentation.RenderTransform, translation),
+            "track transitions group title, details, and artwork while keeping playback controls outside the moving presentation");
+
+        async Task CheckTransitionAsync(string path, int direction, string nextTitle, string? nextArtist,
+            string? nextAlbum, bool hasArtwork)
+        {
+            Layout(surface);
+            var playPosition = play.TranslatePoint(new Point(), surface);
+            var oldTitle = title.Text;
+            var oldArtist = artist.Text;
+            var oldAlbum = album.Text;
+            var oldArtwork = image.Source;
+            var oldImageVisibility = image.Visibility;
+            var oldPlaceholderVisibility = placeholder.Visibility;
+            var opening = OpenTrackAsync(window, path, direction);
+            Check(ReadField<bool>(window, "_loading") && title.Text == oldTitle && artist.Text == oldArtist &&
+                album.Text == oldAlbum && ReferenceEquals(image.Source, oldArtwork) &&
+                image.Visibility == oldImageVisibility && placeholder.Visibility == oldPlaceholderVisibility && !play.IsEnabled,
+                "navigation preserves the complete previous presentation and disables playback while reading the next track");
+            var partialPresentation = false;
+            var earlyPlayback = player.IsPlaying;
+            while (!opening.IsCompleted)
+            {
+                await Task.Delay(10);
+                var stillPrevious = title.Text == oldTitle && artist.Text == oldArtist && album.Text == oldAlbum &&
+                    ReferenceEquals(image.Source, oldArtwork) && image.Visibility == oldImageVisibility &&
+                    placeholder.Visibility == oldPlaceholderVisibility;
+                var fullyUpdated = title.Text == nextTitle && artist.Text == (nextArtist ?? "") &&
+                    album.Text == (nextAlbum ?? "") &&
+                    (hasArtwork ? image is { Source: BitmapSource, Visibility: Visibility.Visible } &&
+                        placeholder.Visibility == Visibility.Collapsed : image.Source is null &&
+                        image.Visibility == Visibility.Collapsed && placeholder.Visibility == Visibility.Visible);
+                partialPresentation |= !stillPrevious && !fullyUpdated;
+                earlyPlayback |= stillPrevious && ReadField<bool>(window, "_loading") && player.IsPlaying;
+            }
+            await opening;
+            Check(!earlyPlayback,
+                "navigation starts native playback only when the new presentation is ready to commit");
+            Check(!partialPresentation && title.Text == nextTitle,
+                "navigation replaces title, metadata, and artwork together without a mixed or blank intermediate presentation");
+            CheckSongMetadata(window, nextArtist, nextAlbum, "navigation commits the new track's artist and album");
+            if (hasArtwork) await WaitForArtworkAsync(window, "navigation commits the new track's embedded artwork");
+            else CheckArtworkPlaceholder(window, "navigation commits the artwork placeholder for an uncovered track");
+            Check(play.IsEnabled && presentation.HasAnimatedProperties == SystemParameters.ClientAreaAnimation &&
+                translation.HasAnimatedProperties == SystemParameters.ClientAreaAnimation && !play.HasAnimatedProperties,
+                "navigation animates only the track presentation and follows Windows reduced-motion preferences");
+            if (SystemParameters.ClientAreaAnimation)
+            {
+                var clock = ReadField<AnimationClock?>(window, "_trackTransitionClock");
+                Check(clock is not null && clock.Timeline.Duration.HasTimeSpan &&
+                    clock.Timeline.Duration.TimeSpan <= TimeSpan.FromMilliseconds(250) &&
+                    clock.Timeline.FillBehavior == FillBehavior.Stop,
+                    "the track transition has a short finite duration without a retained fill state");
+            }
+            Layout(surface);
+            Check((play.TranslatePoint(new Point(), surface) - playPosition).Length < 0.5,
+                "navigation keeps the playback controls stationary while the presentation changes");
+            await WaitUntilAsync(() => !presentation.HasAnimatedProperties && !translation.HasAnimatedProperties &&
+                ReadField<AnimationClock?>(window, "_trackTransitionClock") is null,
+                "completed navigation removes its animation clocks");
+            Check(Math.Abs(presentation.Opacity - 1) < 0.001 && Math.Abs(translation.X) < 0.001,
+                "completed navigation restores full opacity and zero translation");
+        }
+
+        await OpenAsync(window, covered);
+        await CheckTransitionAsync(source, 1, "Museek UI fixture — 音楽", FixtureArtist, FixtureAlbum, hasArtwork: false);
+        await CheckTransitionAsync(covered, -1, "Covered UI fixture", "Covered artist", "Covered album", hasArtwork: true);
+        await CheckTransitionAsync(untagged, 1, "metadata-free audio", null, null, hasArtwork: false);
+
+        for (var attempt = 0; attempt < 6; attempt++)
+        {
+            var replaced = OpenTrackAsync(window, covered, -1);
+            var latest = OpenTrackAsync(window, source, 1);
+            await Task.WhenAll(replaced, latest);
+            Check(ReadField<string?>(window, "_sourcePath") == source && title.Text == "Museek UI fixture — 音楽" &&
+                artist.Text == FixtureArtist && album.Text == FixtureAlbum && image.Source is null &&
+                !ReadField<bool>(window, "_loading"),
+                "rapid replacement cancels the old request and commits only the newest track");
+        }
+        await WaitUntilAsync(() => !presentation.HasAnimatedProperties && !translation.HasAnimatedProperties &&
+            ReadField<AnimationClock?>(window, "_trackTransitionClock") is null &&
+            ReadField<Task?>(window, "_activeProbe") is null && ReadField<Task?>(window, "_activeArtwork") is null &&
+            ReadField<Task?>(window, "_activePlayerInitialization") is null,
+            "repeated navigation releases both animation clocks and completed read tasks");
+
+        await OpenTrackAsync(window, Path.Combine(fixtureDirectory, "missing navigation audio.wav"), 1);
+        CheckErrorState(window, "a navigation error disables playback and clears its source state");
+        CheckArtworkPlaceholder(window, "a navigation error clears the previous track's artwork");
+        CheckSongMetadata(window, null, null, "a navigation error clears the previous track's artist and album");
+        Check(!presentation.HasAnimatedProperties && !translation.HasAnimatedProperties &&
+            ReadField<AnimationClock?>(window, "_trackTransitionClock") is null,
+            "a navigation error retains no animation clocks");
+        await OpenAsync(window, covered);
+        await WaitForArtworkAsync(window, "ordinary opening recovers after a navigation error");
+        Check(!presentation.HasAnimatedProperties && !translation.HasAnimatedProperties,
+            "ordinary file opening does not animate the track presentation");
+        await CheckCloseDuringTrackTransitionAsync(source, covered, fixtureDirectory);
+        await CheckCloseDuringPlayerInitializationAsync(source, fixtureDirectory);
+    }
+
+    private static async Task CheckCloseDuringPlayerInitializationAsync(string source, string fixtureDirectory)
+    {
+        var player = new AudioPlayerService(useDummyAudioOutput: true);
+        var preparation = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var initializationField = typeof(AudioPlayerService).GetField("_initialization",
+            BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new Exception("AudioPlayerService initialization task was not found.");
+        // Hold preparation without invoking a native factory so close coordination
+        // does not depend on a cold machine's plugin-discovery timing.
+        initializationField.SetValue(player, preparation.Task);
+        var window = new MainWindow(settings: new AppSettingsService(Path.Combine(fixtureDirectory,
+                "initialization-close.json")), editTagsContextMenuRegistration: _ => { }, audioPlayer: player);
+        var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        window.Closed += (_, _) => closed.TrySetResult();
+        Task? opening = null;
+        try
+        {
+            Find<Slider>(window, "VolumeSlider").Value = 0;
+            opening = OpenAsync(window, source);
+            Check(ReadField<bool>(window, "_loading") &&
+                ReferenceEquals(ReadField<Task?>(window, "_activePlayerInitialization"), preparation.Task),
+                "a first track records pending native preparation before awaiting metadata");
+            window.Close();
+            await opening.WaitAsync(TimeSpan.FromSeconds(8));
+            Check(ReadField<bool>(window, "_closing") && !ReadField<bool>(window, "_allowClose") &&
+                !closed.Task.IsCompleted && !preparation.Task.IsCompleted &&
+                ReadField<string?>(window, "_sourcePath") is null && !player.IsPlaying &&
+                !window.AcceptOpenRequest(source),
+                "closing cancels the first track and rejects handoffs while waiting for pending native preparation");
+            preparation.TrySetResult();
+            await closed.Task.WaitAsync(TimeSpan.FromSeconds(8));
+            Check(ReadField<string?>(window, "_sourcePath") is null && !player.IsPlaying &&
+                !ReadField<DispatcherTimer>(window, "_timer").IsEnabled &&
+                !Find<FrameworkElement>(window, "TrackPresentation").HasAnimatedProperties &&
+                !Find<TranslateTransform>(window, "TrackTranslation").HasAnimatedProperties &&
+                ReadField<AnimationClock?>(window, "_trackTransitionClock") is null &&
+                !window.AcceptOpenRequest(source),
+                "finishing pending preparation closes the window without publishing a track or restarting playback");
+            Check(typeof(AudioPlayerService).GetField("_player", BindingFlags.Instance | BindingFlags.NonPublic)
+                    ?.GetValue(player) is null &&
+                typeof(AudioPlayerService).GetField("_vlc", BindingFlags.Instance | BindingFlags.NonPublic)
+                    ?.GetValue(player) is null && new WindowInteropHelper(window).Handle == IntPtr.Zero,
+                "pending-initialization close coordination creates no native decoder or window");
+        }
+        finally
+        {
+            preparation.TrySetResult();
+            if (!ReadField<bool>(window, "_allowClose")) window.Close();
+            await closed.Task.WaitAsync(TimeSpan.FromSeconds(8));
+            if (opening is not null) await opening.WaitAsync(TimeSpan.FromSeconds(8));
+        }
+    }
+
+    private static async Task CheckCloseDuringTrackTransitionAsync(string source, string covered, string fixtureDirectory)
+    {
+        foreach (var duringRead in new[] { true, false })
+        {
+            var window = new MainWindow(settings: new AppSettingsService(Path.Combine(fixtureDirectory,
+                    "transition-close-" + duringRead + ".json")), editTagsContextMenuRegistration: _ => { },
+                audioPlayer: new AudioPlayerService(useDummyAudioOutput: true));
+            try
+            {
+                Find<Slider>(window, "VolumeSlider").Value = 0;
+                await OpenAsync(window, covered);
+                var opening = OpenTrackAsync(window, source, 1);
+                if (duringRead)
+                    Check(ReadField<bool>(window, "_loading"), "close-during-navigation setup has an active track read");
+                else
+                {
+                    await opening;
+                    Check(Find<FrameworkElement>(window, "TrackPresentation").HasAnimatedProperties ==
+                        SystemParameters.ClientAreaAnimation, "close-after-navigation setup follows the current motion preference");
+                }
+                var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                window.Closed += (_, _) => closed.TrySetResult();
+                window.Close();
+                await closed.Task.WaitAsync(TimeSpan.FromSeconds(8));
+                await opening;
+                Check(ReadField<bool>(window, "_closing") && !ReadField<DispatcherTimer>(window, "_timer").IsEnabled &&
+                    ReadField<CancellationTokenSource?>(window, "_loadCancellation") is null &&
+                    !Find<FrameworkElement>(window, "TrackPresentation").HasAnimatedProperties &&
+                    !Find<TranslateTransform>(window, "TrackTranslation").HasAnimatedProperties &&
+                    ReadField<AnimationClock?>(window, "_trackTransitionClock") is null,
+                    duringRead ? "closing during navigation cancels the read and releases its timer and clocks" :
+                        "closing during a transition releases its timer and animation clocks");
+                Check(new WindowInteropHelper(window).Handle == IntPtr.Zero,
+                    "navigation-close checks create no native window handle");
+            }
+            finally
+            {
+                if (!ReadField<bool>(window, "_allowClose")) window.Close();
+            }
+        }
     }
 
     private static void CheckSongMetadata(MainWindow window, string? artist, string? album, string description)
     {
         var artistLine = Find<TextBlock>(window, "ArtistName");
         var albumLine = Find<TextBlock>(window, "AlbumName");
-        Check(artistLine.Text == (artist ?? "") && artistLine.Visibility == (artist is null ? Visibility.Collapsed : Visibility.Visible) &&
-            albumLine.Text == (album ?? "") && albumLine.Visibility == (album is null ? Visibility.Collapsed : Visibility.Visible), description);
+        var loaded = ReadField<string?>(window, "_sourcePath") is not null;
+        var missingVisibility = loaded ? Visibility.Hidden : Visibility.Collapsed;
+        Check(artistLine.Text == (artist ?? "") && artistLine.Visibility == (artist is null ? missingVisibility : Visibility.Visible) &&
+            albumLine.Text == (album ?? "") && albumLine.Visibility == (album is null ? missingVisibility : Visibility.Visible) &&
+            Find<StackPanel>(window, "TrackDetails").Visibility == (loaded ? Visibility.Visible : Visibility.Collapsed), description);
     }
 
     private static void CheckMetadataLayout(MainWindow window, FrameworkElement surface, string description)
@@ -1318,6 +1589,10 @@ internal static class Program
         => (Task)(typeof(MainWindow).GetMethod("OpenAsync", BindingFlags.Instance | BindingFlags.NonPublic)
             ?.Invoke(window, [path]) ?? throw new Exception("MainWindow.OpenAsync was not found."));
 
+    private static Task OpenTrackAsync(MainWindow window, string path, int direction)
+        => (Task)(typeof(MainWindow).GetMethod("OpenTrackAsync", BindingFlags.Instance | BindingFlags.NonPublic)
+            ?.Invoke(window, [path, direction]) ?? throw new Exception("MainWindow.OpenTrackAsync was not found."));
+
     private static void InvokeWindowMethod(MainWindow window, string name, params object?[] arguments)
     {
         var method = typeof(MainWindow).GetMethod(name, BindingFlags.NonPublic | BindingFlags.Instance)
@@ -1379,10 +1654,12 @@ internal static class Program
             $"action={AutomationProperties.GetName(Find<Button>(window, "PlayButton"))}";
     }
 
-    private static async Task WaitUntilAsync(Func<bool> condition, string description, Func<string>? diagnostics = null)
+    private static async Task WaitUntilAsync(Func<bool> condition, string description, Func<string>? diagnostics = null,
+        TimeSpan? pollingInterval = null)
     {
         var elapsed = Stopwatch.StartNew();
-        while (!condition() && elapsed.Elapsed < TimeSpan.FromSeconds(8)) await Task.Delay(40);
+        while (!condition() && elapsed.Elapsed < TimeSpan.FromSeconds(8))
+            await Task.Delay(pollingInterval ?? TimeSpan.FromMilliseconds(40));
         var passed = condition();
         Check(passed, !passed && diagnostics is not null ? description + " (" + diagnostics() + ")" : description);
     }

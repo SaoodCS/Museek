@@ -46,36 +46,42 @@
     </DockPanel>
 
     <StackPanel Grid.Row="1" VerticalAlignment="Center" Margin="0,18,0,12">
-      <Border Width="152" Height="152" CornerRadius="14" Background="#2B3326" BorderBrush="#39422F" BorderThickness="1" HorizontalAlignment="Center" Margin="0,0,0,18">
-        <Grid>
-          <Grid.Clip><RectangleGeometry Rect="0,0,150,150" RadiusX="13" RadiusY="13" /></Grid.Clip>
-          <Image x:Name="AlbumArtwork" Stretch="UniformToFill" Visibility="Collapsed" AutomationProperties.Name="Album artwork" />
-          <Border x:Name="ArtworkPlaceholder" Background="Transparent" AutomationProperties.Name="No album artwork">
-            <Path Data="M 12,30 L 12,56 M 28,12 L 28,68 M 44,22 L 44,58 M 60,6 L 60,46" Stroke="#718459" StrokeThickness="6" StrokeStartLineCap="Round" StrokeEndLineCap="Round" HorizontalAlignment="Center" VerticalAlignment="Center" />
-          </Border>
-        </Grid>
-      </Border>
-      <TextBlock x:Name="SongTitle" Text="A little room for music." FontSize="25" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" TextAlignment="Center" Margin="0,0,0,18" AutomationProperties.Name="Song title" />
-      <StackPanel x:Name="TrackDetails" Margin="0,0,0,16" Visibility="Collapsed">
-        <TextBlock x:Name="ArtistName" FontSize="14" Foreground="#BEC7B3" TextTrimming="CharacterEllipsis" TextAlignment="Center" Margin="0,0,0,3" Visibility="Collapsed" AutomationProperties.Name="Artist name" />
-        <TextBlock x:Name="AlbumName" FontSize="12" Foreground="{StaticResource Muted}" TextTrimming="CharacterEllipsis" TextAlignment="Center" Visibility="Collapsed" AutomationProperties.Name="Album name" />
+      <StackPanel x:Name="TrackPresentation">
+        <StackPanel.RenderTransform><TranslateTransform x:Name="TrackTranslation" /></StackPanel.RenderTransform>
+        <Border Width="152" Height="152" CornerRadius="14" Background="#2B3326" BorderBrush="#39422F" BorderThickness="1" HorizontalAlignment="Center" Margin="0,0,0,18">
+          <Grid>
+            <Grid.Clip><RectangleGeometry Rect="0,0,150,150" RadiusX="13" RadiusY="13" /></Grid.Clip>
+            <Image x:Name="AlbumArtwork" Stretch="UniformToFill" Visibility="Collapsed" AutomationProperties.Name="Album artwork" />
+            <Border x:Name="ArtworkPlaceholder" Background="Transparent" AutomationProperties.Name="No album artwork">
+              <Path Data="M 12,30 L 12,56 M 28,12 L 28,68 M 44,22 L 44,58 M 60,6 L 60,46" Stroke="#718459" StrokeThickness="6" StrokeStartLineCap="Round" StrokeEndLineCap="Round" HorizontalAlignment="Center" VerticalAlignment="Center" />
+            </Border>
+          </Grid>
+        </Border>
+        <TextBlock x:Name="SongTitle" Text="A little room for music." FontSize="25" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" TextAlignment="Center" Margin="0,0,0,18" AutomationProperties.Name="Song title" />
+        <StackPanel x:Name="TrackDetails" Height="38" Margin="0,0,0,16" Visibility="Collapsed">
+          <TextBlock x:Name="ArtistName" FontSize="14" Foreground="#BEC7B3" TextTrimming="CharacterEllipsis" TextAlignment="Center" Margin="0,0,0,3" Visibility="Collapsed" AutomationProperties.Name="Artist name" />
+          <TextBlock x:Name="AlbumName" FontSize="12" Foreground="{StaticResource Muted}" TextTrimming="CharacterEllipsis" TextAlignment="Center" Visibility="Collapsed" AutomationProperties.Name="Album name" />
+        </StackPanel>
       </StackPanel>
-      <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
-      <Button x:Name="PreviousTrackButton" Width="44" Height="44" Padding="0" Margin="0,0,12,0" VerticalAlignment="Center" IsEnabled="False" Click="PreviousTrackButton_Click" ToolTip="Previous track" AutomationProperties.Name="Previous track">
-        <Path Data="M 0,0 L 0,16 M 14,0 L 4,8 L 14,16 Z" Stroke="#EDEFE8" StrokeThickness="2" Fill="#EDEFE8" />
-      </Button>
-      <Button x:Name="PlayButton" Width="62" Height="62" Padding="0" Background="{StaticResource Accent}" IsEnabled="False" Click="PlayButton_Click" ToolTip="Play / pause (Space)" AutomationProperties.Name="Play">
-        <Button.Template><ControlTemplate TargetType="Button"><Border x:Name="Circle" Background="{TemplateBinding Background}" CornerRadius="31"><ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" /></Border><ControlTemplate.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Circle" Property="Opacity" Value="0.85" /></Trigger><Trigger Property="IsEnabled" Value="False"><Setter TargetName="Circle" Property="Opacity" Value="0.35" /></Trigger><Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Circle" Property="BorderBrush" Value="White" /><Setter TargetName="Circle" Property="BorderThickness" Value="2" /></Trigger></ControlTemplate.Triggers></ControlTemplate></Button.Template>
-        <Path x:Name="PlayIcon" Data="M 0,0 L 0,20 L 16,10 Z" Fill="#1D2813" Margin="4,0,0,0" />
-      </Button>
-      <Button x:Name="NextTrackButton" Width="44" Height="44" Padding="0" Margin="12,0,0,0" VerticalAlignment="Center" IsEnabled="False" Click="NextTrackButton_Click" ToolTip="Next track" AutomationProperties.Name="Next track">
-        <Path Data="M 14,0 L 14,16 M 0,0 L 10,8 L 0,16 Z" Stroke="#EDEFE8" StrokeThickness="2" Fill="#EDEFE8" />
-      </Button>
-      <Button x:Name="StopButton" Width="50" Height="50" Padding="0" Margin="12,0,0,0" VerticalAlignment="Center" IsEnabled="False" Click="StopButton_Click" ToolTip="Stop and return to start" AutomationProperties.Name="Stop">
-        <Button.Template><ControlTemplate TargetType="Button"><Border x:Name="Circle" Background="{TemplateBinding Background}" CornerRadius="25"><ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" /></Border><ControlTemplate.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Circle" Property="Opacity" Value="0.85" /></Trigger><Trigger Property="IsEnabled" Value="False"><Setter TargetName="Circle" Property="Opacity" Value="0.35" /></Trigger><Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Circle" Property="BorderBrush" Value="{StaticResource Accent}" /><Setter TargetName="Circle" Property="BorderThickness" Value="2" /></Trigger></ControlTemplate.Triggers></ControlTemplate></Button.Template>
-        <Rectangle Width="14" Height="14" RadiusX="2" RadiusY="2" Fill="#EDEFE8" />
-      </Button>
-      </StackPanel>
+      <Grid>
+        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="62" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+        <Button x:Name="PreviousTrackButton" Width="44" Height="44" Padding="0" Margin="0,0,12,0" HorizontalAlignment="Right" VerticalAlignment="Center" IsEnabled="False" Click="PreviousTrackButton_Click" ToolTip="Previous track" AutomationProperties.Name="Previous track">
+          <Path Data="M 0,0 L 0,16 M 14,0 L 4,8 L 14,16 Z" Stroke="#EDEFE8" StrokeThickness="2" Fill="#EDEFE8" />
+        </Button>
+        <Button x:Name="PlayButton" Grid.Column="1" Width="62" Height="62" Padding="0" Background="{StaticResource Accent}" IsEnabled="False" Click="PlayButton_Click" ToolTip="Play / pause (Space)" AutomationProperties.Name="Play">
+          <Button.Template><ControlTemplate TargetType="Button"><Border x:Name="Circle" Background="{TemplateBinding Background}" CornerRadius="31"><ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" /></Border><ControlTemplate.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Circle" Property="Opacity" Value="0.85" /></Trigger><Trigger Property="IsEnabled" Value="False"><Setter TargetName="Circle" Property="Opacity" Value="0.35" /></Trigger><Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Circle" Property="BorderBrush" Value="White" /><Setter TargetName="Circle" Property="BorderThickness" Value="2" /></Trigger></ControlTemplate.Triggers></ControlTemplate></Button.Template>
+          <Path x:Name="PlayIcon" Data="M 0,0 L 0,20 L 16,10 Z" Fill="#1D2813" Margin="4,0,0,0" />
+        </Button>
+        <StackPanel Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Left">
+          <Button x:Name="NextTrackButton" Width="44" Height="44" Padding="0" Margin="12,0,0,0" VerticalAlignment="Center" IsEnabled="False" Click="NextTrackButton_Click" ToolTip="Next track" AutomationProperties.Name="Next track">
+            <Path Data="M 14,0 L 14,16 M 0,0 L 10,8 L 0,16 Z" Stroke="#EDEFE8" StrokeThickness="2" Fill="#EDEFE8" />
+          </Button>
+          <Button x:Name="StopButton" Width="50" Height="50" Padding="0" Margin="12,0,0,0" VerticalAlignment="Center" IsEnabled="False" Click="StopButton_Click" ToolTip="Stop and return to start" AutomationProperties.Name="Stop">
+            <Button.Template><ControlTemplate TargetType="Button"><Border x:Name="Circle" Background="{TemplateBinding Background}" CornerRadius="25"><ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" /></Border><ControlTemplate.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Circle" Property="Opacity" Value="0.85" /></Trigger><Trigger Property="IsEnabled" Value="False"><Setter TargetName="Circle" Property="Opacity" Value="0.35" /></Trigger><Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Circle" Property="BorderBrush" Value="{StaticResource Accent}" /><Setter TargetName="Circle" Property="BorderThickness" Value="2" /></Trigger></ControlTemplate.Triggers></ControlTemplate></Button.Template>
+            <Rectangle Width="14" Height="14" RadiusX="2" RadiusY="2" Fill="#EDEFE8" />
+          </Button>
+        </StackPanel>
+      </Grid>
     </StackPanel>
 
     <Grid Grid.Row="2">

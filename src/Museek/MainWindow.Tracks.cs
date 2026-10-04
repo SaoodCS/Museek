@@ -97,6 +97,6 @@ public partial class MainWindow
         var index = CurrentTrackIndex();
         var target = index + offset;
         if (index >= 0 && target >= 0 && target < _folderTracks.Count)
-            await OpenAsync(_folderTracks[target].Path);
+            await OpenTrackAsync(_folderTracks[target].Path, offset);
     }
 }

@@ -40,6 +40,7 @@ public partial class MainWindow : Window
     private Task? _activeProbe;
     private Task? _activeExport;
     private Task? _activeArtwork;
+    private Task? _activePlayerInitialization;
 
     public event EventHandler? SingleWindowModeChanged;
     public bool SingleWindowMode => _settings.SingleWindowMode;
@@ -59,6 +60,7 @@ public partial class MainWindow : Window
         _initialPath = initialPath;
         _player = audioPlayer ?? new AudioPlayerService();
         _player.PlaybackError += Player_PlaybackError;
+        _player.PlaybackStarted += Player_PlaybackStarted;
         _player.Volume = (int)VolumeSlider.Value;
         _timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(80) };
         _timer.Tick += Timer_Tick;
@@ -103,15 +105,22 @@ public partial class MainWindow : Window
         e.Cancel = true;
         if (_closing) return;
         _closing = true;
+        ResetTrackTransition();
         IsEnabled = false;
         _timer.Stop();
         _loadCancellation?.Cancel();
         _folderCancellation?.Cancel();
         _saveCancellation?.Cancel();
         // Let FFmpeg finish its cancellation cleanup before ending the process.
-        try { await Task.WhenAll(_activeProbe ?? Task.CompletedTask, _activeExport ?? Task.CompletedTask, _activeArtwork ?? Task.CompletedTask, _activeFolder ?? Task.CompletedTask); }
+        try
+        {
+            await Task.WhenAll(_activeProbe ?? Task.CompletedTask, _activeExport ?? Task.CompletedTask,
+                _activeArtwork ?? Task.CompletedTask, _activeFolder ?? Task.CompletedTask,
+                _activePlayerInitialization ?? Task.CompletedTask);
+        }
         catch (Exception) { /* The load/save handler reports errors while the window is open. */ }
         _player.PlaybackError -= Player_PlaybackError;
+        _player.PlaybackStarted -= Player_PlaybackStarted;
         _player.Dispose();
         _allowClose = true;
         _ = Dispatcher.BeginInvoke(Close);
@@ -143,16 +152,18 @@ public partial class MainWindow : Window
         ArtworkPlaceholder.Visibility = bitmap is null ? Visibility.Visible : Visibility.Collapsed;
     }
 
-    private void SetTrackDetails(string? artist, string? album)
+    private void SetTrackDetails(string? artist, string? album, bool reserveSpace = false)
     {
         ArtistName.Text = artist ?? string.Empty;
         ArtistName.ToolTip = artist;
-        ArtistName.Visibility = string.IsNullOrWhiteSpace(artist) ? Visibility.Collapsed : Visibility.Visible;
+        ArtistName.Visibility = string.IsNullOrWhiteSpace(artist)
+            ? (reserveSpace ? Visibility.Hidden : Visibility.Collapsed) : Visibility.Visible;
         AlbumName.Text = album ?? string.Empty;
         AlbumName.ToolTip = album;
-        AlbumName.Visibility = string.IsNullOrWhiteSpace(album) ? Visibility.Collapsed : Visibility.Visible;
+        AlbumName.Visibility = string.IsNullOrWhiteSpace(album)
+            ? (reserveSpace ? Visibility.Hidden : Visibility.Collapsed) : Visibility.Visible;
         var hasDetails = ArtistName.Visibility == Visibility.Visible || AlbumName.Visibility == Visibility.Visible;
-        TrackDetails.Visibility = hasDetails ? Visibility.Visible : Visibility.Collapsed;
-        SongTitle.Margin = new Thickness(0, 0, 0, hasDetails ? 6 : 18);
+        TrackDetails.Visibility = hasDetails || reserveSpace ? Visibility.Visible : Visibility.Collapsed;
+        SongTitle.Margin = new Thickness(0, 0, 0, hasDetails || reserveSpace ? 6 : 18);
     }
 }

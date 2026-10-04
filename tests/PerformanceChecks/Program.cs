@@ -20,6 +20,7 @@ namespace Museek.PerformanceChecks;
 internal static class Program
 {
     private const int HotPathIterations = 10_000;
+    private const int TransitionIterations = 1_000;
     private const int ArtworkIterations = 3;
     private const int ArtworkSize = 4096;
 
@@ -46,7 +47,7 @@ internal static class Program
             var measurements = RunMeasurements();
             var report = new PerformanceReport(baseline ? "baseline" : "checks", DateTimeOffset.UtcNow,
                 RuntimeInformation.FrameworkDescription, RuntimeInformation.OSDescription,
-                ArtworkSize, ArtworkSize, measurements);
+                ArtworkSize, ArtworkSize, SystemParameters.ClientAreaAnimation, measurements);
             Directory.CreateDirectory(Path.GetDirectoryName(output)!);
             File.WriteAllText(output, JsonSerializer.Serialize(report, new JsonSerializerOptions { WriteIndented = true }));
             foreach (var measurement in measurements)
@@ -100,6 +101,7 @@ internal static class Program
         var player = new AudioPlayerService(useDummyAudioOutput: true);
         MainWindow? window = null;
         Measurement tickResult;
+        Measurement transitionResult;
         try
         {
             var settings = new AppSettingsService(Path.Combine(Path.GetTempPath(),
@@ -108,6 +110,9 @@ internal static class Program
             // The window is never shown, playback never starts, and its timer is driven explicitly.
             ReadField<DispatcherTimer>(window, "_timer").Stop();
             Find<Slider>(window, "VolumeSlider").Value = 0;
+            // Keep the paused benchmark on the real native-player path. Startup
+            // initialization is setup and stays outside measured timer updates.
+            player.InitializeAsync().GetAwaiter().GetResult();
             player.Pause();
             SetField(window, "_sourcePath", "paused performance fixture.wav");
             SetField(window, "_stoppedPosition", 12.5);
@@ -123,6 +128,7 @@ internal static class Program
             if (Find<TextBlock>(window, "CurrentTime").Text != "0:12" ||
                 Math.Abs(Find<RangeSeekBar>(window, "SeekBar").Position - 12.5) > 0.00001)
                 throw new InvalidOperationException("The measured timer did not update the ready paused player.");
+            transitionResult = CheckTrackTransitions(window);
         }
         finally
         {
@@ -145,7 +151,86 @@ internal static class Program
         };
         var artworkResult = Measure("LargeArtworkValidation", ArtworkIterations, 1,
             ArtworkIterations * 1_048_576L, validateArtwork);
-        return [seekResult, tickResult, artworkResult];
+        return [seekResult, tickResult, transitionResult, artworkResult];
+    }
+
+    private static Measurement CheckTrackTransitions(MainWindow window)
+    {
+        var presentation = Find<StackPanel>(window, "TrackPresentation");
+        var translation = Find<TranslateTransform>(window, "TrackTranslation");
+        var clockField = typeof(MainWindow).GetField("_trackTransitionClock", BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("MainWindow._trackTransitionClock was not found.");
+        var animate = (typeof(MainWindow).GetMethod("AnimateTrackTransition", BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("MainWindow.AnimateTrackTransition was not found."))
+            .CreateDelegate<Action<int>>(window);
+        var reset = (typeof(MainWindow).GetMethod("ResetTrackTransition", BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("MainWindow.ResetTrackTransition was not found."))
+            .CreateDelegate<Action>(window);
+        bool IsReset() => clockField.GetValue(window) is null &&
+            !presentation.HasAnimatedProperties && !translation.HasAnimatedProperties &&
+            Math.Abs(presentation.Opacity - 1) < 0.00001 && Math.Abs(translation.X) < 0.00001;
+
+        // Rapid replacement is the worst case for retaining old clocks. Reflection
+        // setup and dispatcher cleanup stay outside the allocation measurement.
+        Action<int> replace = index => animate(index % 2 == 0 ? -1 : 1);
+        var result = Measure("RapidTrackTransitions", TransitionIterations, 100,
+            TransitionIterations * 8_192L, replace);
+        reset();
+        if (!IsReset()) throw new InvalidOperationException("Reset retained transition clocks or animated values.");
+
+        animate(0);
+        if (!IsReset()) throw new InvalidOperationException("Opening a file directly unexpectedly creates transition clocks.");
+
+        if (SystemParameters.ClientAreaAnimation)
+        {
+            // Keep only weak samples of replaced clocks, then let the final clock
+            // complete naturally. A rooted old clock fails collection after cleanup.
+            var replacedClocks = CaptureReplacedClocks(window, clockField, animate);
+            if (clockField.GetValue(window) is null || !presentation.HasAnimatedProperties || !translation.HasAnimatedProperties)
+                throw new InvalidOperationException("Track transitions did not attach their finite render clocks.");
+            PumpUntil(IsReset, TimeSpan.FromSeconds(2), "Track transition did not clean up on completion.");
+            PumpUntil(() =>
+            {
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+                GC.Collect();
+                return replacedClocks.All(clock => !clock.IsAlive);
+            }, TimeSpan.FromSeconds(2), "Completed/replaced track transition clocks remain rooted.");
+            Console.WriteLine("PASS: transition completion clears animated properties and releases replaced clocks.");
+        }
+        else
+        {
+            if (!IsReset()) throw new InvalidOperationException("Disabled system animations still attach transition clocks.");
+            Console.WriteLine("PASS: disabled system animations create no transition clocks.");
+        }
+        return result;
+    }
+
+    private static WeakReference[] CaptureReplacedClocks(MainWindow window, FieldInfo clockField, Action<int> animate)
+    {
+        var clocks = new WeakReference[32];
+        for (var index = 0; index < clocks.Length; index++)
+        {
+            animate(index % 2 == 0 ? -1 : 1);
+            clocks[index] = new WeakReference(clockField.GetValue(window)
+                ?? throw new InvalidOperationException("Track transition clock was not created."));
+        }
+        return clocks;
+    }
+
+    private static void PumpUntil(Func<bool> condition, TimeSpan timeout, string failure)
+    {
+        var frame = new DispatcherFrame();
+        var started = Stopwatch.GetTimestamp();
+        var timer = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromMilliseconds(10) };
+        timer.Tick += (_, _) =>
+        {
+            if (condition() || Stopwatch.GetElapsedTime(started) >= timeout) frame.Continue = false;
+        };
+        timer.Start();
+        try { Dispatcher.PushFrame(frame); }
+        finally { timer.Stop(); }
+        if (!condition()) throw new InvalidOperationException(failure);
     }
 
     private static byte[] CreateArtwork()
@@ -200,5 +285,6 @@ internal static class Program
         double BytesPerIteration, double ElapsedMilliseconds, long AllocationCeilingBytes, bool Passed);
 
     private sealed record PerformanceReport(string Mode, DateTimeOffset CapturedUtc, string Runtime,
-        string OperatingSystem, int ArtworkWidth, int ArtworkHeight, IReadOnlyList<Measurement> Measurements);
+        string OperatingSystem, int ArtworkWidth, int ArtworkHeight, bool TrackAnimationsEnabled,
+        IReadOnlyList<Measurement> Measurements);
 }

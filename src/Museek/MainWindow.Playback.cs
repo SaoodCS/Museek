@@ -219,6 +219,16 @@ public partial class MainWindow
         UpdateControls();
     }
 
+    private void Player_PlaybackStarted(object? sender, EventArgs e)
+    {
+        // VLC creates its audio output asynchronously and may reset its initial volume.
+        // Reapply the chosen level on the dispatcher, never on VLC's event thread.
+        Dispatcher.BeginInvoke(() =>
+        {
+            if (!_closing) _player.Volume = (int)VolumeSlider.Value;
+        });
+    }
+
     private void Player_PlaybackError(object? sender, EventArgs e)
     {
         // Never call back into VLC on its event thread.

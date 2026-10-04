@@ -34,9 +34,13 @@ public partial class MainWindow
         _ = OpenAsync(path);
     }
 
-    private async Task OpenAsync(string path)
+    private Task OpenAsync(string path) => OpenTrackAsync(path, 0);
+
+    private async Task OpenTrackAsync(string path, int direction)
     {
         if (_exporting || _closing) return;
+        var transitioning = direction != 0 && _sourcePath is not null;
+        ResetTrackTransition();
         _loadCancellation?.Cancel();
         _folderCancellation?.Cancel();
         _folderTracks = [];
@@ -50,9 +54,13 @@ public partial class MainWindow
         _loading = true;
         SetTrimMode(false);
         SeekBar.SetDuration(0);
-        SetArtwork(null);
-        SetTrackDetails(null, null);
-        SongTitle.Text = "Opening audio…";
+        if (!transitioning)
+        {
+            SetArtwork(null);
+            SetTrackDetails(null, null);
+            SongTitle.Text = "Opening audio…";
+            SongTitle.ToolTip = null;
+        }
         StatusText.Text = "Reading audio…";
         UpdateCurrentTime(0);
         TotalTime.Text = "0:00";
@@ -65,15 +73,34 @@ public partial class MainWindow
             _activeArtwork = artwork;
             var probe = _export.ProbeAsync(fullPath, cancellation.Token);
             _activeProbe = probe;
+            var initialization = _player.InitializeAsync();
+            _activePlayerInitialization = initialization;
             var info = await probe;
+            // Native plugin discovery can be slow on a cold launch. Keep it off the
+            // dispatcher while probing; cancellation stops this request's wait only.
+            await initialization.WaitAsync(cancellation.Token);
             cancellation.Token.ThrowIfCancellationRequested();
             if (_closing) return;
+            // Metadata and artwork are read in parallel. During navigation retain the
+            // current presentation until both are ready, without buffering a second view.
+            byte[]? artworkBytes = null;
+            if (transitioning)
+            {
+                artworkBytes = await artwork;
+                cancellation.Token.ThrowIfCancellationRequested();
+                if (_closing) return;
+            }
             _player.Open(fullPath);
             _sourcePath = fullPath;
             SeekBar.SetDuration(info.Duration.TotalSeconds);
             SongTitle.Text = info.Title;
             SongTitle.ToolTip = info.Title;
-            SetTrackDetails(info.Artist, info.Album);
+            SetTrackDetails(info.Artist, info.Album, reserveSpace: true);
+            if (transitioning)
+            {
+                SetArtwork(artworkBytes);
+                AnimateTrackTransition(direction);
+            }
             TotalTime.Text = FormatTime(info.Duration.TotalSeconds);
             Title = $"{info.Title} — Museek";
             StatusText.Text = "Space to pause. Trim to keep your favorite part.";
@@ -81,16 +108,25 @@ public partial class MainWindow
             _loading = false;
             UpdateControls();
             _activeFolder = RefreshFolderTracksAsync();
-            var artworkBytes = await artwork;
-            cancellation.Token.ThrowIfCancellationRequested();
-            if (!_closing) SetArtwork(artworkBytes);
+            if (!transitioning)
+            {
+                artworkBytes = await artwork;
+                cancellation.Token.ThrowIfCancellationRequested();
+                if (!_closing) SetArtwork(artworkBytes);
+            }
         }
         catch (OperationCanceledException) { }
         catch (Exception ex)
         {
             if (!cancellation.IsCancellationRequested && !_closing)
             {
+                _player.Stop();
+                _sourcePath = null;
+                _wantsPlayback = false;
+                SetArtwork(null);
+                SetTrackDetails(null, null);
                 SongTitle.Text = "Couldn't open this file.";
+                SongTitle.ToolTip = null;
                 StatusText.Text = ex.Message;
                 Title = "Museek";
             }
@@ -108,6 +144,7 @@ public partial class MainWindow
                 _loadCancellation = null;
                 _activeProbe = null;
                 _activeArtwork = null;
+                if (_activePlayerInitialization?.IsCompleted == true) _activePlayerInitialization = null;
                 _loading = false;
                 if (!_closing) UpdateControls();
             }

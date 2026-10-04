@@ -2,6 +2,15 @@
 
 Version notes are maintained alongside the code. See [GitHub Releases](https://github.com/SaoodCS/Museek/releases) for published versions and installers.
 
+## 1.3.1
+
+- Centered Play in the app, including while trimming and resizing.
+- Smoothed previous/next track changes with coordinated artwork and metadata, stable controls, and a brief transition that respects Windows animation settings.
+- Deferred native playback initialization until audio is opened so the player window can appear sooner.
+- Kept first-time decoder loading off the UI thread and reapplied the selected volume when audio output starts.
+
+See [the full version notes](releases/1.3.1.md).
+
 ## 1.3.0
 
 - Added a checked **Sort By** menu for Title, Artist, Album and Genre, with Title selected by default.
