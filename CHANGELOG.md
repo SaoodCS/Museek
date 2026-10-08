@@ -2,6 +2,14 @@
 
 Version notes are maintained alongside the code. See [GitHub Releases](https://github.com/SaoodCS/Museek/releases) for published versions and installers.
 
+## 1.3.2
+
+- Packaged a validated VLC plugin cache to reduce first-playback decoder discovery.
+- Preserved plugin timestamps during installation so the cache remains usable after updates.
+- Bounded tag-editor artwork previews in both dimensions and checked source dimensions before decoding pixels.
+
+See [the full version notes](releases/1.3.2.md).
+
 ## 1.3.1
 
 - Centered Play in the app, including while trimming and resizing.

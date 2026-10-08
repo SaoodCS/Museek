@@ -42,3 +42,30 @@ the close-during-preparation scenario, so native files may already be warm; it
 is not a cold end-to-end launch measurement. Private-memory differences include
 normal runtime variation. Loaded-module checks directly establish whether VLC
 was initialized.
+
+The distribution build also generates `libvlc/win-x64/plugins/plugins.dat`
+with the exact bundled VLC core. This moves plugin catalog discovery to
+packaging while keeping normal runtime scanning and its missing/corrupt-cache
+fallback. The build helper stays in this checks project; it is not shipped.
+
+Run the cache modes in separate processes:
+
+```powershell
+dotnet run --project tests/StartupChecks -c Release -- --generate-plugin-cache dist/Museek/libvlc/win-x64
+dotnet run --no-build --project tests/StartupChecks -c Release -- --check-plugin-cache dist/Museek/libvlc/win-x64 --ffmpeg dist/Museek/tools/ffmpeg.exe --output artifacts/plugin-cache.json
+```
+
+The verifier checks the exact loaded core path, selected plugin-module counts,
+WAV playback, optional generated MP3 playback, and an unchanged cache hash.
+`--cache-only` disables scanning solely to prove that the cache contains the
+required playback plugins. Production playback retains normal scanning.
+Initialization measurements use fresh processes and include native loading and
+decoder construction; filesystem caches may already be warm. They exclude
+application launch and window rendering and are not reboot measurements.
+
+`InstallerChecks.ps1 -VlcNativeDirectory <native-directory> -FfmpegPath <ffmpeg>`
+installs the real cached runtime alongside its harmless app fixture. It checks
+every plugin timestamp, cache bytes, normal/cache-only decoding, ZIP relocation,
+and missing, corrupt, and stale-cache detection with working playback fallback.
+It also verifies the installer removes its managed plugin cache on uninstall.
+`Build.ps1` supplies these arguments automatically.

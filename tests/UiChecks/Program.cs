@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Diagnostics;
 using System.IO;
 using System.Reflection;
@@ -1000,6 +1001,7 @@ internal static class Program
             Check((await service.ReadAsync(first)).ArtworkBytes is null && (await service.ReadAsync(second)).ArtworkBytes is null,
                 "saving the editor's Remove action clears artwork from the selected batch");
             var selectedArtwork = await File.ReadAllBytesAsync(Path.Combine(fixtureDirectory, "cover image.png"));
+            CheckTagEditorPreviewBounds(editor);
             editor.SetArtwork(selectedArtwork);
             var artworkPatch = editor.BuildPatch();
             Check(artworkPatch.ArtworkAction == ArtworkAction.Replace &&
@@ -1038,8 +1040,128 @@ internal static class Program
                 "cancelling unsaved tag edits preserves the audio file byte-for-byte");
         }
         finally { single.Close(); }
+        await CheckTagEditorOriginalPreviewBoundsAsync(covered, fixtureDirectory);
         await CheckTagEditorArtworkReuseAsync(covered, fixtureDirectory);
         await CheckTagEditorCloseDuringLoadAsync(first, fixtureDirectory);
+    }
+
+    private static void CheckTagEditorPreviewBounds(TagEditorWindow editor)
+    {
+        foreach (var (width, height) in new[] { (2, 32), (32, 2), (512, 512), (128, 96), (128, 2048), (2048, 128) })
+        {
+            var bytes = CreateTagEditorArtwork(width, height);
+            editor.SetArtwork(bytes);
+            CheckTagEditorArtworkPreview(editor, width, height, $"replacement {width}x{height}");
+            Check(editor.BuildPatch().ArtworkBytes?.SequenceEqual(bytes) == true,
+                $"{width}x{height} artwork preview leaves the saved image bytes intact");
+        }
+
+        var previous = Find<Image>(editor, "ArtworkImage").Source;
+        var previousBytes = editor.BuildPatch().ArtworkBytes;
+        var oversizedRejected = false;
+        try { editor.SetArtwork(CreateOversizedArtworkHeader()); }
+        catch (ArgumentException ex) { oversizedRejected = ex.Message.Contains("32 megapixels", StringComparison.Ordinal); }
+        Check(oversizedRejected && ReferenceEquals(previous, Find<Image>(editor, "ArtworkImage").Source) &&
+            editor.BuildPatch().ArtworkBytes?.SequenceEqual(previousBytes ?? []) == true,
+            "oversized source dimensions are rejected before replacing the current artwork or preview");
+    }
+
+    private static async Task CheckTagEditorOriginalPreviewBoundsAsync(string covered, string fixtureDirectory)
+    {
+        var cases = new[]
+        {
+            (Name: "portrait", Bytes: CreateTagEditorArtwork(128, 2048), Width: 128, Height: 2048, Mime: "image/png"),
+            (Name: "landscape", Bytes: CreateTagEditorArtwork(2048, 128), Width: 2048, Height: 128, Mime: "image/png"),
+            (Name: "BMP", Bytes: CreateTagEditorArtwork(96, 128, bmp: true), Width: 96, Height: 128, Mime: "image/bmp"),
+            (Name: "corrupt", Bytes: new byte[] { 1, 2, 3, 4 }, Width: 0, Height: 0, Mime: "image/png"),
+            (Name: "oversized", Bytes: CreateOversizedArtworkHeader(), Width: 0, Height: 0, Mime: "image/png")
+        };
+        var service = new AudioTagService();
+        var replacement = CreateTagEditorArtwork(32, 32);
+        foreach (var item in cases)
+        {
+            var path = Path.Combine(fixtureDirectory, $"editor original {item.Name}.mp3");
+            File.Copy(covered, path);
+            using (var file = TagLib.File.Create(path))
+            {
+                file.Tag.Pictures = [new TagLib.Picture(new TagLib.ByteVector(item.Bytes))
+                {
+                    Type = TagLib.PictureType.FrontCover, MimeType = item.Mime
+                }];
+                file.Save();
+            }
+            var editor = new TagEditorWindow([path]);
+            try
+            {
+                await editor.LoadAsync();
+                CheckTagEditorArtworkPreview(editor, item.Width, item.Height, $"original {item.Name}");
+                editor.SetArtwork(replacement);
+                Click(Find<Button>(editor, "KeepArtworkButton"));
+                CheckTagEditorArtworkPreview(editor, item.Width, item.Height, $"restored original {item.Name}");
+                Check(editor.BuildPatch() is { ArtworkAction: ArtworkAction.Keep, ArtworkBytes: null },
+                    $"Keep cancels replacement of original {item.Name} artwork");
+                var genre = $"Original {item.Name} preserved";
+                Find<TextBox>(editor, "GenreValue").Text = genre;
+                await editor.SaveAsync();
+                var saved = await service.ReadAsync(path);
+                Check(saved.Genre == genre && saved.ArtworkBytes?.SequenceEqual(item.Bytes) == true,
+                    $"scalar tag saving preserves original {item.Name} artwork bytes");
+                CheckTagEditorArtworkPreview(editor, item.Width, item.Height, $"saved original {item.Name}");
+            }
+            finally { editor.Close(); }
+        }
+    }
+
+    private static void CheckTagEditorArtworkPreview(TagEditorWindow editor, int width, int height, string description)
+    {
+        var image = Find<Image>(editor, "ArtworkImage");
+        var placeholder = Find<TextBlock>(editor, "ArtworkPlaceholder");
+        if (width == 0 || height == 0)
+        {
+            Check(image is { Source: null, Visibility: Visibility.Collapsed } &&
+                placeholder is { Text: "Artwork unavailable", Visibility: Visibility.Visible },
+                $"{description} clears the previous image and shows the unavailable placeholder");
+            return;
+        }
+        var preview = image.Source as BitmapSource;
+        Check(preview is { PixelWidth: > 0 and <= 420, PixelHeight: > 0 and <= 420, IsFrozen: true } &&
+            Math.Max(preview.PixelWidth, preview.PixelHeight) == Math.Min(420, Math.Max(width, height)) &&
+            image.Visibility == Visibility.Visible && placeholder.Visibility == Visibility.Collapsed,
+            $"{description} bounds both decoded dimensions without upscaling");
+        Check(Math.Abs((long)preview!.PixelWidth * height - (long)preview.PixelHeight * width) <= Math.Max(width, height),
+            $"{description} preserves its aspect ratio within pixel rounding");
+        var pixel = new byte[4];
+        new FormatConvertedBitmap(preview, PixelFormats.Bgra32, null, 0)
+            .CopyPixels(new Int32Rect(0, 0, 1, 1), pixel, 4, 0);
+        Check(pixel[3] == 255, $"{description} remains decodable after its source stream is closed");
+    }
+
+    private static byte[] CreateTagEditorArtwork(int width, int height, bool bmp = false)
+    {
+        var pixels = new byte[width * height * 4];
+        for (var index = 3; index < pixels.Length; index += 4) pixels[index] = 255;
+        var frame = BitmapSource.Create(width, height, 96, 96, PixelFormats.Bgra32, null, pixels, width * 4);
+        BitmapEncoder encoder = bmp ? new BmpBitmapEncoder() : new PngBitmapEncoder();
+        encoder.Frames.Add(BitmapFrame.Create(frame));
+        using var encoded = new MemoryStream();
+        encoder.Save(encoded);
+        return encoded.ToArray();
+    }
+
+    private static byte[] CreateOversizedArtworkHeader()
+    {
+        // Only inflate the header, so testing the source limit needs no large pixel allocation.
+        var bytes = CreateTagEditorArtwork(1, 1);
+        BinaryPrimitives.WriteInt32BigEndian(bytes.AsSpan(16, 4), 8192);
+        BinaryPrimitives.WriteInt32BigEndian(bytes.AsSpan(20, 4), 4097);
+        uint crc = uint.MaxValue;
+        foreach (var value in bytes.AsSpan(12, 17))
+        {
+            crc ^= value;
+            for (var bit = 0; bit < 8; bit++) crc = (crc >> 1) ^ ((crc & 1) == 0 ? 0 : 0xedb88320u);
+        }
+        BinaryPrimitives.WriteUInt32BigEndian(bytes.AsSpan(29, 4), ~crc);
+        return bytes;
     }
 
     private static async Task CheckTagEditorArtworkReuseAsync(string covered, string fixtureDirectory)

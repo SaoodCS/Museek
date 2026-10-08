@@ -243,11 +243,20 @@ public partial class TagEditorWindow : Window
         if (bytes is null) return;
         try
         {
+            if (bytes.Length > 8 * 1024 * 1024) throw new InvalidDataException("Artwork is too large.");
             using var stream = new MemoryStream(bytes, writable: false);
+            var decoder = BitmapDecoder.Create(stream, BitmapCreateOptions.DelayCreation, BitmapCacheOption.OnDemand);
+            var frame = decoder.Frames[0];
+            var width = frame.PixelWidth;
+            var height = frame.PixelHeight;
+            if (width <= 0 || height <= 0 || (long)width * height > 32 * 1024 * 1024)
+                throw new InvalidDataException("Artwork dimensions are too large.");
+            stream.Position = 0;
             var bitmap = new BitmapImage();
             bitmap.BeginInit();
             bitmap.CacheOption = BitmapCacheOption.OnLoad;
-            bitmap.DecodePixelWidth = 420;
+            if (width >= height) bitmap.DecodePixelWidth = Math.Min(420, width);
+            else bitmap.DecodePixelHeight = Math.Min(420, height);
             bitmap.StreamSource = stream;
             bitmap.EndInit();
             bitmap.Freeze();
@@ -276,8 +285,9 @@ public partial class TagEditorWindow : Window
         ArgumentNullException.ThrowIfNull(bytes);
         if (bytes.Length > 8 * 1024 * 1024) throw new ArgumentException("Choose a JPEG or PNG image smaller than 8 MB.");
         using var stream = new MemoryStream(bytes, writable: false);
-        var decoder = BitmapDecoder.Create(stream, BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnLoad);
+        var decoder = BitmapDecoder.Create(stream, BitmapCreateOptions.DelayCreation, BitmapCacheOption.OnDemand);
         if (decoder is not (JpegBitmapDecoder or PngBitmapDecoder) || decoder.Frames.Count == 0 ||
+            decoder.Frames[0].PixelWidth <= 0 || decoder.Frames[0].PixelHeight <= 0 ||
             (long)decoder.Frames[0].PixelWidth * decoder.Frames[0].PixelHeight > 32 * 1024 * 1024)
             throw new ArgumentException("Choose a valid JPEG or PNG image up to 32 megapixels.");
         _replacementArtwork = bytes.ToArray();

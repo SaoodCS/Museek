@@ -109,6 +109,19 @@ try {
     & (Join-Path $tools 'ffmpeg.exe') -version | Select-Object -First 3 | Set-Content -LiteralPath (Join-Path $licenses 'FFmpeg-build.txt')
     if ($LASTEXITCODE -ne 0) { throw 'Could not record the bundled FFmpeg build information.' }
 
+    # Generate the version-specific cache with the exact core being packaged. The
+    # helper belongs to the checks project and is never added to the app payload.
+    $startupChecks = Join-Path $projectRoot 'tests\StartupChecks'
+    $nativeVlc = Assert-BuildPath (Join-Path $staging 'libvlc\win-x64')
+    & $DotNetPath run --project $startupChecks -c Release -- --generate-plugin-cache $nativeVlc `
+        --output (Join-Path $projectRoot 'artifacts\plugin-cache-generation.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Bundled VLC plugin cache generation failed.' }
+    # A fresh process proves the cache is usable; the generating process has an
+    # already populated module bank and cannot establish a cache hit.
+    & $DotNetPath run --no-build --project $startupChecks -c Release -- --check-plugin-cache $nativeVlc `
+        --ffmpeg (Join-Path $tools 'ffmpeg.exe') --output (Join-Path $projectRoot 'artifacts\plugin-cache-published.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Bundled VLC plugin cache validation failed.' }
+
     # A publish overlays its target. Promote only a complete fresh payload so removed
     # assemblies or old distribution files cannot survive into the next installer.
     [void](Assert-BuildPath $staging)
@@ -144,7 +157,8 @@ try {
     }
     & (Join-Path $PSScriptRoot 'Build-Installer.ps1') -MakensisPath $MakensisPath
     if (-not $SkipChecks) {
-        & (Join-Path $projectRoot 'tests\InstallerChecks.ps1') -NsisPath $MakensisPath -DotNetPath $DotNetPath
+        & (Join-Path $projectRoot 'tests\InstallerChecks.ps1') -NsisPath $MakensisPath -DotNetPath $DotNetPath `
+            -VlcNativeDirectory (Join-Path $output 'libvlc\win-x64') -FfmpegPath (Join-Path $output 'tools\ffmpeg.exe')
         & (Join-Path $projectRoot 'tests\ReleaseChecks.ps1') -DotNetPath $DotNetPath
     }
     Write-Host "Ready: $output\Museek.exe"

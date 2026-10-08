@@ -13,6 +13,8 @@ OutFile "${SETUP_OUTPUT}"
 InstallDir "${DEFAULT_INSTALL_DIR}"
 InstallDirRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_ID}" "InstallLocation"
 SetCompressor /SOLID zlib
+; VLC's plugin cache checks file sizes and modification times after extraction.
+SetDateSave on
 CRCCheck force
 VIProductVersion "${APP_VERSION_QUAD}"
 VIAddVersionKey /LANG=1033 "ProductName" "${PRODUCT_NAME} Setup"

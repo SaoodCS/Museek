@@ -11,7 +11,7 @@
     <RootNamespace>Museek</RootNamespace>
     <ApplicationIcon>Assets/Museek.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <Version>1.3.1</Version>
+    <Version>1.3.2</Version>
     <Product>Museek</Product>
     <Description>A simple audio player, trimmer and tag editor for Windows.</Description>
   </PropertyGroup>

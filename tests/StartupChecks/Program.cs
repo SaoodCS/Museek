@@ -18,12 +18,29 @@ internal static class Program
     {
         try
         {
+            var generateIndex = Array.IndexOf(args, "--generate-plugin-cache");
+            var cacheIndex = Array.IndexOf(args, "--check-plugin-cache");
+            var ffmpegIndex = Array.IndexOf(args, "--ffmpeg");
+            if (generateIndex >= 0 && generateIndex + 1 >= args.Length)
+                throw new ArgumentException("--generate-plugin-cache requires a native VLC directory.");
+            if (cacheIndex >= 0 && cacheIndex + 1 >= args.Length)
+                throw new ArgumentException("--check-plugin-cache requires a native VLC directory.");
+            if (ffmpegIndex >= 0 && ffmpegIndex + 1 >= args.Length)
+                throw new ArgumentException("--ffmpeg requires an executable path.");
+            if (generateIndex >= 0 && cacheIndex >= 0)
+                throw new ArgumentException("Generate and verify a plugin cache in separate processes.");
             var baseline = args.Contains("--baseline");
             var windowCheck = args.Contains("--window");
             var outputIndex = Array.IndexOf(args, "--output");
             var output = Path.GetFullPath(outputIndex >= 0 && outputIndex + 1 < args.Length
                 ? args[outputIndex + 1] : Path.Combine("artifacts", "startup-checks.json"));
-            var report = windowCheck ? MeasureWindow()
+            var report = generateIndex >= 0
+                ? VlcPluginCacheChecks.Generate(args[generateIndex + 1])
+                : cacheIndex >= 0
+                ? VlcPluginCacheChecks.VerifyAsync(args[cacheIndex + 1], args.Contains("--cache-only"),
+                        ffmpegIndex >= 0 ? args[ffmpegIndex + 1] : null)
+                    .GetAwaiter().GetResult()
+                : windowCheck ? MeasureWindow()
                 : CheckPlayerAsync(baseline, !args.Contains("--real-output")).GetAwaiter().GetResult();
             Directory.CreateDirectory(Path.GetDirectoryName(output)!);
             File.WriteAllText(output, JsonSerializer.Serialize(report, new JsonSerializerOptions { WriteIndented = true }));
@@ -243,7 +260,7 @@ internal static class Program
         }
     }
 
-    private static string WriteWave(string directory, string name)
+    internal static string WriteWave(string directory, string name)
     {
         var path = Path.Combine(directory, name);
         const int sampleRate = 8000;
@@ -262,5 +279,5 @@ internal static class Program
         if (!passed) failures.Add(description);
     }
 
-    private sealed record Report(string Scenario, Dictionary<string, double> Measurements, List<string> Failures);
+    internal sealed record Report(string Scenario, Dictionary<string, double> Measurements, List<string> Failures);
 }

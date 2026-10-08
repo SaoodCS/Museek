@@ -1,7 +1,9 @@
 [CmdletBinding()]
 param(
     [string]$NsisPath,
-    [string]$DotNetPath
+    [string]$DotNetPath,
+    [string]$VlcNativeDirectory,
+    [string]$FfmpegPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -114,6 +116,79 @@ function Test-PayloadUnlocked([string]$Directory) {
     return $true
 }
 
+function Invoke-CacheCheck([string]$Directory, [string]$Scenario, [switch]$CacheOnly) {
+    $reportPath = Join-Path $runDirectory ("plugin-cache-$Scenario.json")
+    $arguments = @('run', '--no-build', '--project', (Join-Path $PSScriptRoot 'StartupChecks'), '-c', 'Release',
+        '--', '--check-plugin-cache', $Directory, '--output', $reportPath)
+    if ($CacheOnly) { $arguments += '--cache-only' }
+    if ($FfmpegPath) { $arguments += @('--ffmpeg', $FfmpegPath) }
+    & $DotNetPath @arguments | Out-Null
+    $exitCode = $LASTEXITCODE
+    if (-not (Test-Path -LiteralPath $reportPath -PathType Leaf)) {
+        throw "Plugin-cache check did not produce a report: $Scenario"
+    }
+    return [pscustomobject]@{ ExitCode = $exitCode; Report = (Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json) }
+}
+
+function Test-InstalledVlcCache {
+    $native = Join-Path $installDirectory 'libvlc\win-x64'
+    $cache = Join-Path $native 'plugins\plugins.dat'
+    $sourceCache = Join-Path $VlcNativeDirectory 'plugins\plugins.dat'
+    Assert-Check ((Get-FileHash -LiteralPath $cache).Hash -eq (Get-FileHash -LiteralPath $sourceCache).Hash) `
+        'setup installs the generated plugin cache without changing its bytes'
+    $plugins = @(Get-ChildItem -LiteralPath (Join-Path $VlcNativeDirectory 'plugins') -Filter '*_plugin.dll' -File -Recurse)
+    foreach ($plugin in $plugins) {
+        $relative = $plugin.FullName.Substring($VlcNativeDirectory.Length).TrimStart('\')
+        $installed = Get-Item -LiteralPath (Join-Path $native $relative)
+        Assert-Check ($installed.LastWriteTimeUtc -eq $plugin.LastWriteTimeUtc) 'setup preserves a cached plugin timestamp'
+    }
+    $normal = Invoke-CacheCheck $native 'installed'
+    Assert-Check ($normal.ExitCode -eq 0) 'installed cache prevents eager loading and decodes audio with normal plugin scanning'
+    $cacheOnly = Invoke-CacheCheck $native 'installed-only' -CacheOnly
+    Assert-Check ($cacheOnly.ExitCode -eq 0) 'installed cache alone contains the plugins needed for WAV and MP3 playback'
+
+    # An archive changes the absolute root and uses ZIP timestamp precision.
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $archive = Join-Path $runDirectory 'native-cache.zip'
+    $extracted = Join-Path $runDirectory 'Extracted Native 音楽'
+    [IO.Compression.ZipFile]::CreateFromDirectory($native, $archive)
+    [IO.Compression.ZipFile]::ExtractToDirectory($archive, $extracted)
+    $relocated = Invoke-CacheCheck $extracted 'zip-relocated'
+    Assert-Check ($relocated.ExitCode -eq 0) 'plugin cache survives ZIP extraction and relocation'
+
+    $cacheBytes = [IO.File]::ReadAllBytes($cache)
+    try {
+        Remove-Item -LiteralPath $cache -Force
+        $missing = Invoke-CacheCheck $native 'missing'
+        Assert-Check ($missing.ExitCode -ne 0 -and $missing.Report.Measurements.InitializationLoadedPluginCount -eq $plugins.Count) `
+            'the regression check detects missing cache and eager plugin discovery'
+        Assert-Check (@($missing.Report.Failures | Where-Object { $_ -match 'start .* playback|decode .*clock' }).Count -eq 0) `
+            'normal playback falls back safely when the cache is missing'
+        [IO.File]::WriteAllBytes($cache, [Text.Encoding]::ASCII.GetBytes('invalid-cache'))
+        $corrupt = Invoke-CacheCheck $native 'corrupt'
+        Assert-Check ($corrupt.ExitCode -ne 0 -and $corrupt.Report.Measurements.InitializationLoadedPluginCount -eq $plugins.Count) `
+            'the regression check detects corrupted cache and eager plugin discovery'
+        Assert-Check (@($corrupt.Report.Failures | Where-Object { $_ -match 'start .* playback|decode .*clock' }).Count -eq 0) `
+            'normal playback falls back safely when the cache is corrupted'
+    } finally { [IO.File]::WriteAllBytes($cache, $cacheBytes) }
+
+    $timestamps = @{}
+    try {
+        foreach ($plugin in Get-ChildItem -LiteralPath (Join-Path $native 'plugins') -Filter '*_plugin.dll' -File -Recurse) {
+            $timestamps[$plugin.FullName] = $plugin.LastWriteTimeUtc
+            [IO.File]::SetLastWriteTimeUtc($plugin.FullName, $plugin.LastWriteTimeUtc.AddSeconds(2))
+        }
+        $stale = Invoke-CacheCheck $native 'stale'
+        Assert-Check ($stale.ExitCode -ne 0 -and $stale.Report.Measurements.InitializationLoadedPluginCount -eq $plugins.Count) `
+            'the regression check detects stale plugin timestamps and eager discovery'
+        Assert-Check (@($stale.Report.Failures | Where-Object { $_ -match 'start .* playback|decode .*clock' }).Count -eq 0) `
+            'normal playback falls back safely when cache timestamps are stale'
+    } finally {
+        foreach ($path in $timestamps.Keys) { [IO.File]::SetLastWriteTimeUtc($path, $timestamps[$path]) }
+    }
+    Assert-Check ((Invoke-CacheCheck $native 'restored').ExitCode -eq 0) 'restoring packaged timestamps and cache restores efficient discovery'
+}
+
 if (-not $DotNetPath) { $DotNetPath = Join-Path $projectRoot '.tools\dotnet\dotnet.exe' }
 if (-not (Test-Path -LiteralPath $DotNetPath -PathType Leaf)) {
     $DotNetPath = (Get-Command dotnet -ErrorAction Stop).Source
@@ -195,6 +270,14 @@ try {
     [IO.File]::WriteAllText((Join-Path $payload2 'nested\managed.txt'), 'nested-v2')
     [IO.File]::WriteAllText((Join-Path $payload2 'nested\音楽データ.txt'), 'unicode-v2')
     [IO.File]::WriteAllText((Join-Path $payload2 'new-managed.txt'), 'This belongs to version 2.')
+    if ($VlcNativeDirectory) {
+        $VlcNativeDirectory = Assert-WorkspacePath $VlcNativeDirectory
+        Assert-Check (Test-Path -LiteralPath (Join-Path $VlcNativeDirectory 'plugins\plugins.dat') -PathType Leaf) `
+            'the native installer fixture starts with a generated plugin cache'
+        $nativeParent = Join-Path $payload2 'libvlc'
+        New-Item -ItemType Directory -Path $nativeParent -Force | Out-Null
+        Copy-Item -LiteralPath $VlcNativeDirectory -Destination (Join-Path $nativeParent 'win-x64') -Recurse
+    }
 
     New-Item -ItemType Directory -Path $installDirectory -Force | Out-Null
     Assert-Check (@(Get-ChildItem -LiteralPath $installDirectory -Force).Count -eq 0) 'fresh installation starts with an existing empty destination folder'
@@ -278,6 +361,7 @@ try {
     } finally { $uninstallParent.Dispose() }
     $calls = Read-FixtureLog
     Assert-Check (@($calls | Where-Object { ($_.Arguments -join ' ') -eq '--register --quiet' }).Count -eq 2) 'update registers only after the new payload is installed'
+    if ($VlcNativeDirectory) { Test-InstalledVlcCache }
 
     # Run uninstall.exe itself. NSIS copies to TEMP; polling waits for its child to finish.
     $uninstallExe = Join-Path $installDirectory 'uninstall.exe'
@@ -286,6 +370,10 @@ try {
         $null -eq (Read-UninstallRegistration $productId) } 20) 'uninstall completes and removes itself and the Installed apps entry'
     Assert-Check (-not (Test-Path -LiteralPath (Join-Path $installDirectory 'Museek.exe'))) 'uninstall removes the managed executable'
     Assert-Check (-not (Test-Path -LiteralPath (Join-Path $installDirectory 'new-managed.txt'))) 'uninstall removes new managed files'
+    if ($VlcNativeDirectory) {
+        Assert-Check (-not (Test-Path -LiteralPath (Join-Path $installDirectory 'libvlc\win-x64\plugins\plugins.dat'))) `
+            'uninstall removes the managed plugin cache'
+    }
     Assert-Check (-not (Test-Path -LiteralPath (Join-Path $installDirectory 'nested\managed.txt'))) 'uninstall removes nested managed files'
     Assert-Check (-not (Test-Path -LiteralPath (Join-Path $installDirectory 'nested\音楽データ.txt'))) 'uninstall removes Unicode-named managed files'
     Assert-Check (-not (Test-Path -LiteralPath $shortcutPath)) 'uninstall removes its Start menu shortcut'
@@ -293,6 +381,12 @@ try {
     Assert-Check ((Get-FileHash -LiteralPath $settings -Algorithm SHA256).Hash -eq $settingsHash) 'uninstall preserves unrelated nested settings'
     $calls = Read-FixtureLog
     Assert-Check (@($calls | Where-Object { ($_.Arguments -join ' ') -eq '--unregister --quiet' }).Count -eq 1) 'uninstall invokes quiet app cleanup once before deleting the executable'
+    if ($VlcNativeDirectory) {
+        # Later migration/repair cases test installer ownership rather than VLC.
+        # Keep their independent setup fixtures small after the native round trip.
+        $fixtureNative = Assert-WorkspacePath (Join-Path $payload2 'libvlc')
+        Remove-Item -LiteralPath $fixtureNative -Recurse -Force
+    }
 
     # Existing foreign folders must not be overwritten merely because /D names them.
     $foreignFile = Join-Path $foreignDirectory 'not-museek.txt'

@@ -327,7 +327,7 @@ public sealed class AudioTagService
         try
         {
             using var stream = new MemoryStream(bytes, writable: false);
-            var decoder = BitmapDecoder.Create(stream, BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnLoad);
+            var decoder = BitmapDecoder.Create(stream, BitmapCreateOptions.DelayCreation, BitmapCacheOption.OnDemand);
             var mime = decoder switch
             {
                 PngBitmapDecoder => "image/png", JpegBitmapDecoder => "image/jpeg",
