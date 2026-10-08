@@ -32,7 +32,9 @@ Setup installs for your Windows account at `%LOCALAPPDATA%\Programs\Museek` with
 
 **Update**
 
-Close Museek and its tag editor windows, download the newer installer from the same Releases page, and run it. Setup updates the existing installation and keeps your settings and audio files. Museek does not currently update itself automatically.
+Choose **Help → Check for updates** to look for a newer stable release. If one is available, choose **Download update**, then **Install update**. Museek verifies the download, closes, and opens Setup; follow its installation steps. Close any other Museek or tag editor windows before installing. Your settings and audio files are kept. Checks and installation happen only when you request them.
+
+You can also close Museek, download the newer installer from the same Releases page, and run it.
 
 **Uninstall**
 

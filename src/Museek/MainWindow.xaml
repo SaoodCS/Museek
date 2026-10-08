@@ -24,6 +24,7 @@
           <MenuItem x:Name="SortGenreMenuItem" Header="Genre" Tag="Genre" IsCheckable="True" Click="SortBy_Click" />
         </MenuItem>
         <MenuItem x:Name="HelpMenu" Header="_Help" Style="{StaticResource TopMenuStyle}">
+          <MenuItem x:Name="CheckForUpdatesMenuItem" Header="Check for updates" Click="CheckForUpdates_Click" />
           <MenuItem Header="About Museek" Click="About_Click" />
         </MenuItem>
       </Menu>

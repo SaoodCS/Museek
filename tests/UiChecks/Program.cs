@@ -52,13 +52,14 @@ internal static class Program
             Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "artifacts"));
         var tagEditorOnly = args.Length > 1 && args[1] == "--tag-editor-only";
         var navigationOnly = args.Length > 1 && args[1] == "--navigation-only";
+        var updateOnly = args.Length > 1 && args[1] == "--update-only";
         Dispatcher.CurrentDispatcher.BeginInvoke(async () =>
         {
             try
             {
-                await RunChecksAsync(artifacts, tagEditorOnly, navigationOnly);
+                await RunChecksAsync(artifacts, tagEditorOnly, navigationOnly, updateOnly);
                 exitCode = 0;
-                Console.WriteLine($"All {_checks} {(tagEditorOnly ? "tag editor" : navigationOnly ? "folder navigation" : "silent WPF UI and native playback")} checks passed.");
+                Console.WriteLine($"All {_checks} {(updateOnly ? "update window" : tagEditorOnly ? "tag editor" : navigationOnly ? "folder navigation" : "silent WPF UI and native playback")} checks passed.");
             }
             catch (Exception exception) { Console.Error.WriteLine(exception); }
             finally
@@ -71,14 +72,22 @@ internal static class Program
         return exitCode;
     }
 
-    private static async Task RunChecksAsync(string artifacts, bool tagEditorOnly, bool navigationOnly)
+    private static async Task RunChecksAsync(string artifacts, bool tagEditorOnly, bool navigationOnly, bool updateOnly)
     {
         Directory.CreateDirectory(artifacts);
         var fixtureDirectory = Path.Combine(artifacts, "fixtures-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(fixtureDirectory);
         MainWindow? window = null;
+        Exception? failure = null;
         try
         {
+            if (updateOnly)
+            {
+                Check(typeof(MainWindow).Assembly.GetType("Museek.UpdateWindow") is not null,
+                    "Museek provides an update window");
+                await CheckUpdateWindowAsync(fixtureDirectory, artifacts);
+                return;
+            }
             if (navigationOnly)
             {
                 await CheckFolderNavigationAsync(fixtureDirectory, artifacts);
@@ -165,6 +174,7 @@ internal static class Program
             CheckContextMenuSelection(source, covered);
             await CheckTagEditorAsync(source, covered, fixtureDirectory, artifacts);
             if (tagEditorOnly) return;
+            await CheckUpdateWindowAsync(fixtureDirectory, artifacts);
 
             Check(window.AcceptOpenRequest(covered) && window.AcceptOpenRequest(source) &&
                 ReadField<string?>(window, "_queuedOpenPath") == source && ReadField<string?>(window, "_sourcePath") is null,
@@ -174,7 +184,7 @@ internal static class Program
                 "loading audio disables Stop and the other playback controls");
             await WaitUntilAsync(() => ReadField<string?>(window, "_sourcePath") == source &&
                 !ReadField<bool>(window, "_loading"),
-                "Loaded opens the latest queued launch instead of the constructor's initial file");
+                "Loaded opens the latest queued launch instead of the constructor's initial file", () => LoadingState(window));
             Check(Find<TextBlock>(window, "SongTitle").Text == title && window.Title.Contains(title),
                 "opening a Unicode path displays its metadata title");
             CheckSongMetadata(window, FixtureArtist, FixtureAlbum,
@@ -334,6 +344,12 @@ internal static class Program
             window = null;
             Console.WriteLine("Rendered UI artifacts: " + artifacts);
         }
+        catch (Exception exception)
+        {
+            failure = exception;
+            if (window is not null) Console.Error.WriteLine("Failed UI state: " + LoadingState(window));
+            throw;
+        }
         finally
         {
             if (window is not null)
@@ -341,11 +357,361 @@ internal static class Program
                 var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
                 window.Closed += (_, _) => closed.TrySetResult();
                 window.Close();
-                await closed.Task.WaitAsync(TimeSpan.FromSeconds(8));
+                try { await closed.Task.WaitAsync(TimeSpan.FromSeconds(8)); }
+                catch (TimeoutException cleanupFailure) when (failure is not null)
+                {
+                    Console.Error.WriteLine("UI cleanup failure: " + cleanupFailure + "\n" + LoadingState(window));
+                }
             }
             // This unique child directory contains only fixtures created by this runner.
             if (Directory.Exists(fixtureDirectory) && string.Equals(Path.GetDirectoryName(fixtureDirectory),
                 artifacts, StringComparison.OrdinalIgnoreCase)) Directory.Delete(fixtureDirectory, recursive: true);
+        }
+    }
+
+    private static async Task CheckUpdateWindowAsync(string fixtureDirectory, string artifacts)
+    {
+        var release = CreateUpdateRelease();
+        var current = new FakeUpdateService();
+        var window = new UpdateWindow(current, _ => throw new Exception("A current app must not install an update."));
+        try
+        {
+            await window.CheckAsync();
+            Check(current.CheckCalls == 1 && Find<Button>(window, "UpdateActionButton") is
+                { Content: "Check again", IsEnabled: true } && UpdateWindowText(window).Contains("1.4.0"),
+                "the current-version result shows its version and offers another check");
+            SnapshotUpdateWindow(UpdateWindowSurface(window), Path.Combine(artifacts, "update-current.png"));
+        }
+        finally { await CloseUpdateWindowAsync(window); }
+
+        var pendingCheck = new TaskCompletionSource<UpdateRelease?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var pendingDownload = new TaskCompletionSource<DownloadedInstaller>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var pendingValidation = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        IProgress<double>? downloadProgress = null;
+        var updater = new FakeUpdateService
+        {
+            Check = token => pendingCheck.Task.WaitAsync(token),
+            Download = (_, progress, token) =>
+            {
+                downloadProgress = progress;
+                progress?.Report(0.25);
+                return pendingDownload.Task.WaitAsync(token);
+            },
+            Validate = (_, token) => pendingValidation.Task.WaitAsync(token)
+        };
+        var installed = new List<DownloadedInstaller>();
+        window = new UpdateWindow(updater, installer =>
+        {
+            Check(updater.ValidationCalls == 1 && pendingValidation.Task.IsCompletedSuccessfully,
+                "installation runs only after the final validation succeeds");
+            installed.Add(installer);
+        });
+        var verified = CreateUpdateInstaller(release, fixtureDirectory);
+        try
+        {
+            var checking = window.CheckAsync();
+            var repeatedCheck = window.CheckAsync();
+            Check(updater.CheckCalls == 1 && !Find<Button>(window, "UpdateActionButton").IsEnabled,
+                "repeated checks share one active operation and disable the action button");
+            var surface = UpdateWindowSurface(window);
+            SnapshotUpdateWindow(surface, Path.Combine(artifacts, "update-checking.png"));
+            pendingCheck.SetResult(release);
+            await Task.WhenAll(checking, repeatedCheck);
+            Check(Find<Button>(window, "UpdateActionButton") is { Content: "Download update", IsEnabled: true } &&
+                UpdateWindowText(window).Contains("9.8.7") && installed.Count == 0,
+                "an available update displays the newer version and waits for a download request");
+            SnapshotUpdateWindow(surface, Path.Combine(artifacts, "update-available.png"));
+            var downloading = window.DownloadAsync();
+            var repeatedDownload = window.DownloadAsync();
+            await WaitUntilAsync(() => Math.Abs(Find<ProgressBar>(window, "UpdateProgress").Value /
+                Find<ProgressBar>(window, "UpdateProgress").Maximum - 0.25) < 0.001,
+                "download progress reaches the rendered progress bar");
+            Check(updater.DownloadCalls == 1 && updater.ValidationCalls == 0 && installed.Count == 0,
+                "repeated download requests neither duplicate the download nor start installation");
+            SnapshotUpdateWindow(surface, Path.Combine(artifacts, "update-downloading.png"));
+            pendingDownload.SetResult(verified);
+            await Task.WhenAll(downloading, repeatedDownload);
+            Check(Find<Button>(window, "UpdateActionButton") is { Content: "Install update", IsEnabled: true } &&
+                File.Exists(verified.InstallerPath) && installed.Count == 0,
+                "a verified download offers installation without launching it automatically");
+            SnapshotUpdateWindow(surface, Path.Combine(artifacts, "update-ready.png"));
+            var readyDetails = Find<TextBlock>(window, "UpdateDetails").Text;
+            downloadProgress?.Report(0.1);
+            await Dispatcher.Yield(DispatcherPriority.Background);
+            Check(Find<TextBlock>(window, "UpdateDetails").Text == readyDetails &&
+                Find<ProgressBar>(window, "UpdateProgress").Visibility == Visibility.Collapsed,
+                "late download notifications cannot replace the verified-installation state");
+            var installing = window.InstallAsync();
+            var repeatedInstall = window.InstallAsync();
+            Check(updater.ValidationCalls == 1 && installed.Count == 0,
+                "repeated install requests share final validation and wait before handing off the installer");
+            pendingValidation.SetResult();
+            await Task.WhenAll(installing, repeatedInstall);
+            Check(installed.Count == 1 && ReferenceEquals(installed[0], verified),
+                "a successful installation request hands off the verified installer exactly once");
+            await CloseUpdateWindowAsync(window);
+            Check(File.Exists(verified.InstallerPath), "successful installer handoff retains the file for Setup");
+            downloadProgress?.Report(0.1);
+            await Dispatcher.Yield(DispatcherPriority.Background);
+        }
+        finally
+        {
+            await CloseUpdateWindowAsync(window);
+            verified.Dispose();
+        }
+
+        var synchronousInstaller = CreateUpdateInstaller(release, fixtureDirectory);
+        var synchronous = new FakeUpdateService
+        {
+            Check = _ => Task.FromResult<UpdateRelease?>(release),
+            Download = (_, _, _) => Task.FromResult(synchronousInstaller)
+        };
+        var synchronousHandoffs = 0;
+        window = new UpdateWindow(synchronous, installer =>
+        {
+            window.Close();
+            Check(File.Exists(installer.InstallerPath),
+                "synchronous owner closure preserves the installer during handoff");
+            synchronousHandoffs++;
+        });
+        try
+        {
+            await window.CheckAsync();
+            await window.DownloadAsync();
+            await window.InstallAsync();
+            await window.Completion.WaitAsync(TimeSpan.FromSeconds(8));
+            Check(synchronousHandoffs == 1 && File.Exists(synchronousInstaller.InstallerPath),
+                "synchronously completed validation and closure hand off an installer exactly once");
+        }
+        finally
+        {
+            await CloseUpdateWindowAsync(window);
+            synchronousInstaller.Dispose();
+        }
+
+        var launchFailureInstaller = CreateUpdateInstaller(release, fixtureDirectory);
+        var launchFailure = new FakeUpdateService
+        {
+            Check = _ => Task.FromResult<UpdateRelease?>(release),
+            Download = (_, _, _) => Task.FromResult(launchFailureInstaller)
+        };
+        window = new UpdateWindow(launchFailure, _ => throw new InvalidOperationException("Installer launch fixture failed."));
+        try
+        {
+            await window.CheckAsync();
+            await window.DownloadAsync();
+            await window.InstallAsync();
+            Check(launchFailure.ValidationCalls == 1 && !File.Exists(launchFailureInstaller.InstallerPath) &&
+                Find<Button>(window, "UpdateActionButton") is { Content: "Download update", IsEnabled: true } &&
+                UpdateWindowText(window).Contains("Installer launch fixture failed."),
+                "a failed installer launch disposes its download and leaves an actionable retry");
+        }
+        finally { await CloseUpdateWindowAsync(window); }
+
+        var failures = new FakeUpdateService
+        {
+            Check = _ => Task.FromException<UpdateRelease?>(new IOException("Update check fixture failed."))
+        };
+        var launches = 0;
+        window = new UpdateWindow(failures, _ => launches++);
+        try
+        {
+            await window.CheckAsync();
+            Check(Find<Button>(window, "UpdateActionButton") is { Content: "Check again", IsEnabled: true } &&
+                UpdateWindowText(window).Contains("Update check fixture failed."),
+                "a failed update check reports its error and permits retry");
+            failures.Check = _ => Task.FromResult<UpdateRelease?>(release);
+            await window.CheckAsync();
+            Check(failures.CheckCalls == 2 && Find<Button>(window, "UpdateActionButton").Content?.ToString() == "Download update",
+                "retrying a failed check can display an available update");
+            failures.Download = (_, _, _) => Task.FromException<DownloadedInstaller>(new InvalidDataException("Checksum mismatch fixture."));
+            await window.DownloadAsync();
+            await window.InstallAsync();
+            Check(launches == 0 && failures.ValidationCalls == 0 &&
+                UpdateWindowText(window).Contains("Checksum mismatch fixture."),
+                "a failed download verification never enables installer handoff");
+            var tampered = CreateUpdateInstaller(release, fixtureDirectory);
+            failures.Download = (_, _, _) => Task.FromResult(tampered);
+            await window.DownloadAsync();
+            failures.Validate = (_, _) => Task.FromException(new InvalidDataException("Installer changed fixture."));
+            await window.InstallAsync();
+            Check(failures.ValidationCalls == 1 && launches == 0 && !File.Exists(tampered.InstallerPath) &&
+                Find<Button>(window, "UpdateActionButton") is { Content: "Download update", IsEnabled: true } &&
+                UpdateWindowText(window).Contains("Installer changed fixture."),
+                "failed prelaunch validation deletes the abandoned installer and offers a fresh download");
+        }
+        finally { await CloseUpdateWindowAsync(window); }
+
+        var abandoned = CreateUpdateInstaller(release, fixtureDirectory);
+        var abandonedUpdater = new FakeUpdateService
+        {
+            Check = _ => Task.FromResult<UpdateRelease?>(release),
+            Download = (_, _, _) => Task.FromResult(abandoned)
+        };
+        window = new UpdateWindow(abandonedUpdater, _ => launches++);
+        await window.CheckAsync();
+        await window.DownloadAsync();
+        await CloseUpdateWindowAsync(window);
+        Check(!File.Exists(abandoned.InstallerPath) && !Directory.Exists(Path.GetDirectoryName(abandoned.InstallerPath)),
+            "closing without installing deletes the verified download and its temporary directory");
+
+        await CheckUpdateWindowCancellationAsync(release, fixtureDirectory, checking: true);
+        await CheckUpdateWindowCancellationAsync(release, fixtureDirectory, checking: false);
+
+        var validating = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cancelledInstaller = CreateUpdateInstaller(release, fixtureDirectory);
+        var validatingUpdater = new FakeUpdateService
+        {
+            Check = _ => Task.FromResult<UpdateRelease?>(release),
+            Download = (_, _, _) => Task.FromResult(cancelledInstaller),
+            Validate = (_, token) => validating.Task.WaitAsync(token)
+        };
+        window = new UpdateWindow(validatingUpdater, _ => launches++);
+        try
+        {
+            await window.CheckAsync();
+            await window.DownloadAsync();
+            var installing = window.InstallAsync();
+            await CloseUpdateWindowAsync(window);
+            await installing;
+            Check(validatingUpdater.ValidationToken.IsCancellationRequested && launches == 0 &&
+                !File.Exists(cancelledInstaller.InstallerPath),
+                "closing during final validation cancels installation and removes the abandoned installer");
+        }
+        finally { await CloseUpdateWindowAsync(window); }
+    }
+
+    private static async Task CheckUpdateWindowCancellationAsync(UpdateRelease release, string fixtureDirectory, bool checking)
+    {
+        var pending = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var path = Path.Combine(fixtureDirectory, "partial-update-" + Guid.NewGuid().ToString("N"));
+        var launches = 0;
+        var updater = new FakeUpdateService
+        {
+            Check = async token =>
+            {
+                if (checking) await pending.Task.WaitAsync(token);
+                return release;
+            },
+            Download = async (_, progress, token) =>
+            {
+                await File.WriteAllTextAsync(path, "Partial update fixture.", token);
+                progress?.Report(0.5);
+                try { await pending.Task.WaitAsync(token); }
+                finally { File.Delete(path); }
+                throw new Exception("The pending download must be cancelled.");
+            }
+        };
+        var window = new UpdateWindow(updater, _ => launches++);
+        try
+        {
+            if (!checking) await window.CheckAsync();
+            var operation = checking ? window.CheckAsync() : window.DownloadAsync();
+            if (!checking) await WaitUntilAsync(() => File.Exists(path), "the cancellation fixture has a partial download");
+            await CloseUpdateWindowAsync(window);
+            await operation;
+            Check((checking ? updater.CheckToken : updater.DownloadToken).IsCancellationRequested &&
+                !File.Exists(path) && launches == 0,
+                $"closing during {(checking ? "checking" : "downloading")} cancels the operation and waits for cleanup");
+            var calls = updater.CheckCalls + updater.DownloadCalls + updater.ValidationCalls;
+            await Task.WhenAll(window.CheckAsync(), window.DownloadAsync(), window.InstallAsync());
+            Check(updater.CheckCalls + updater.DownloadCalls + updater.ValidationCalls == calls,
+                "a closed update window rejects further operation requests");
+        }
+        finally { await CloseUpdateWindowAsync(window); }
+    }
+
+    private static string UpdateWindowText(UpdateWindow window)
+        => Find<TextBlock>(window, "UpdateCurrentVersion").Text + " " +
+            Find<TextBlock>(window, "UpdateStatus").Text + " " + Find<TextBlock>(window, "UpdateDetails").Text;
+
+    private static FrameworkElement UpdateWindowSurface(UpdateWindow window)
+    {
+        Check(!window.IsVisible && new WindowInteropHelper(window).Handle == IntPtr.Zero,
+            "update checks and rendering create no native window or installer process");
+        var content = (UIElement)window.Content;
+        window.Content = null;
+        var surface = new Border { Child = content, Background = window.Background, Resources = window.Resources,
+            Width = window.Width };
+        TextElement.SetFontFamily(surface, window.FontFamily);
+        TextElement.SetFontSize(surface, window.FontSize);
+        TextElement.SetForeground(surface, window.Foreground);
+        LayoutUpdateWindow(surface);
+        Check(Find<TextBlock>(window, "UpdateStatus").ActualWidth > 100 &&
+            Find<Button>(window, "UpdateActionButton").ActualWidth > 60 &&
+            Find<Button>(window, "UpdateCloseButton").ActualWidth > 40,
+            "the update window lays out its status and action controls offscreen");
+        return surface;
+    }
+
+    private static void LayoutUpdateWindow(FrameworkElement surface)
+    {
+        surface.Height = double.NaN;
+        surface.Measure(new Size(surface.Width, double.PositiveInfinity));
+        surface.Height = surface.DesiredSize.Height;
+        Layout(surface);
+    }
+
+    private static void SnapshotUpdateWindow(FrameworkElement surface, string path)
+    {
+        LayoutUpdateWindow(surface);
+        Snapshot(surface, path, layout: false);
+    }
+
+    private static async Task CloseUpdateWindowAsync(UpdateWindow window)
+    {
+        if (!window.Completion.IsCompleted) window.Close();
+        await window.Completion.WaitAsync(TimeSpan.FromSeconds(8));
+    }
+
+    private static UpdateRelease CreateUpdateRelease()
+        => (UpdateRelease)Activator.CreateInstance(typeof(UpdateRelease), BindingFlags.Instance | BindingFlags.NonPublic,
+            binder: null, args: [new Version(9, 8, 7), "v9.8.7", "Museek-9.8.7-setup.exe",
+                new Uri("https://github.com/SaoodSaood/Museek/releases/tag/v9.8.7"), 32L, 128L, null, null, Guid.Empty],
+            culture: null)!;
+
+    private static DownloadedInstaller CreateUpdateInstaller(UpdateRelease release, string fixtureDirectory)
+    {
+        var directory = Path.Combine(fixtureDirectory, Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, release.InstallerName);
+        File.WriteAllBytes(path, [77, 90, 1, 2]);
+        return (DownloadedInstaller)Activator.CreateInstance(typeof(DownloadedInstaller), BindingFlags.Instance | BindingFlags.NonPublic,
+            binder: null, args: [release, path, Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))), Guid.Empty, fixtureDirectory],
+            culture: null)!;
+    }
+
+    private sealed class FakeUpdateService : IAppUpdateService
+    {
+        public Version CurrentVersion => new(1, 4, 0);
+        public Func<CancellationToken, Task<UpdateRelease?>> Check { get; set; } = _ => Task.FromResult<UpdateRelease?>(null);
+        public Func<UpdateRelease, IProgress<double>?, CancellationToken, Task<DownloadedInstaller>> Download { get; set; }
+            = (_, _, _) => Task.FromException<DownloadedInstaller>(new InvalidOperationException("No download fixture."));
+        public Func<DownloadedInstaller, CancellationToken, Task> Validate { get; set; } = (_, _) => Task.CompletedTask;
+        public int CheckCalls { get; private set; }
+        public int DownloadCalls { get; private set; }
+        public int ValidationCalls { get; private set; }
+        public CancellationToken CheckToken { get; private set; }
+        public CancellationToken DownloadToken { get; private set; }
+        public CancellationToken ValidationToken { get; private set; }
+        public Task<UpdateRelease?> CheckAsync(CancellationToken token = default)
+        {
+            CheckCalls++;
+            CheckToken = token;
+            return Check(token);
+        }
+        public Task<DownloadedInstaller> DownloadAsync(UpdateRelease release, IProgress<double>? progress = null,
+            CancellationToken token = default)
+        {
+            DownloadCalls++;
+            DownloadToken = token;
+            return Download(release, progress, token);
+        }
+        public Task ValidateInstallerAsync(DownloadedInstaller installer, CancellationToken token = default)
+        {
+            ValidationCalls++;
+            ValidationToken = token;
+            return Validate(installer, token);
         }
     }
 
@@ -772,9 +1138,10 @@ internal static class Program
             singleWindow.Header?.ToString() == "Single-window mode" && ReferenceEquals(toolsEntries[2], editTags) &&
             editTags.IsCheckable && editTags.Header?.ToString() == "'Edit Tags' context menu",
             "Tools contains Default Apps and checkable Single-window and Edit Tags settings");
-        Check((help.Header?.ToString() ?? "").Replace("_", "") == "Help" && helpEntries.Length == 1 &&
-            helpEntries[0].Header?.ToString() == "About Museek",
-            "Help contains only About Museek");
+        Check((help.Header?.ToString() ?? "").Replace("_", "") == "Help" && helpEntries.Length == 2 &&
+            helpEntries[0].Header?.ToString() == "Check for updates" &&
+            helpEntries[1].Header?.ToString() == "About Museek",
+            "Help contains Check for updates and About Museek");
         Layout(surface);
         Check(menu.TranslatePoint(new Point(), surface).Y <= 8 && menu.ActualHeight > 0,
             "Tools and Help sit at the top of the client content below the native title bar");
@@ -1775,6 +2142,12 @@ internal static class Program
             $"pending={ReadField<double?>(window, "_pendingSeek")}, stopped={ReadField<double?>(window, "_stoppedPosition")}, " +
             $"action={AutomationProperties.GetName(Find<Button>(window, "PlayButton"))}";
     }
+
+    private static string LoadingState(MainWindow window)
+        => $"source={ReadField<string?>(window, "_sourcePath")}, queued={ReadField<string?>(window, "_queuedOpenPath")}, " +
+            $"probe={ReadField<Task?>(window, "_activeProbe")?.Status}, artwork={ReadField<Task?>(window, "_activeArtwork")?.Status}, " +
+            $"initialization={ReadField<Task?>(window, "_activePlayerInitialization")?.Status}, " +
+            $"closing={ReadField<bool>(window, "_closing")}, loading={ReadField<bool>(window, "_loading")}";
 
     private static async Task WaitUntilAsync(Func<bool> condition, string description, Func<string>? diagnostics = null,
         TimeSpan? pollingInterval = null)

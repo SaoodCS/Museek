@@ -8,6 +8,16 @@ ManifestDPIAware True
 !include "x64.nsh"
 !include "WinVer.nsh"
 
+!ifndef UPDATE_WAIT_TIMEOUT_MS
+  !define UPDATE_WAIT_TIMEOUT_MS 30000
+!endif
+!if ${UPDATE_WAIT_TIMEOUT_MS} < 1
+  !error "The update-parent wait timeout must be positive."
+!endif
+!if ${UPDATE_WAIT_TIMEOUT_MS} > 30000
+  !error "The update-parent wait timeout cannot exceed 30000 milliseconds."
+!endif
+
 Name "${PRODUCT_NAME}"
 OutFile "${SETUP_OUTPUT}"
 InstallDir "${DEFAULT_INSTALL_DIR}"
@@ -49,6 +59,8 @@ Var RelativeFile
 Var MutexHandle
 Var RecoveryCount
 Var MarkerStage
+Var UpdateProcessHandle
+Var UpdatePid
 
 !include "${PAYLOAD_INCLUDE}"
 !include "${MANIFEST_INCLUDE}"
@@ -143,6 +155,9 @@ writable_done:
 FunctionEnd
 
 Function ${Prefix}Fail
+  !if "${Prefix}" == ""
+    Call CloseUpdateParentHandle
+  !endif
   FileOpen $0 "$TEMP\${PRODUCT_ID}.Setup-error.log" w
   FileWrite $0 "$FailureMessage$\r$\nInstall folder: $INSTDIR$\r$\n"
   FileClose $0
@@ -247,7 +262,103 @@ marker_report:
   Call Fail
 FunctionEnd
 
+Function CloseUpdateParentHandle
+  StrCmp $UpdateProcessHandle 0 update_handle_done
+  System::Call 'kernel32::CloseHandle(p $UpdateProcessHandle)'
+  StrCpy $UpdateProcessHandle 0
+update_handle_done:
+FunctionEnd
+
+; Capture before the welcome page: an open handle continues to identify the
+; original process even if its numeric PID is later recycled.
+Function CaptureUpdateParent
+  StrCpy $UpdateProcessHandle 0
+  ${GetParameters} $0
+  ClearErrors
+  ${GetOptions} "$0" "/UPDATEPID" $1
+  IfErrors update_parent_done
+  StrCpy $2 $1 1
+  StrCmp $2 "=" 0 update_pid_invalid
+  StrCpy $UpdatePid $1 "" 1
+  StrCmp $UpdatePid "" update_pid_invalid
+  IntOp $2 $UpdatePid + 0
+  StrCmp $2 $UpdatePid 0 update_pid_invalid
+  IntCmp $2 0 update_pid_invalid update_pid_invalid
+  ; Reject duplicate options instead of choosing an ambiguous parent.
+  StrCpy $3 0
+  StrCpy $5 0
+update_pid_scan:
+  StrCpy $4 $0 1 $3
+  StrCmp $4 "" update_pid_open
+  StrCpy $4 $0 10 $3
+  StrCmp $4 "/UPDATEPID" 0 update_pid_next
+  IntOp $5 $5 + 1
+  StrCmp $5 1 0 update_pid_invalid
+  ; GetOptions treats adjacent slashes as option delimiters and trims spaces.
+  ; Require the original argument to contain exactly '=digits' as one token.
+  IntOp $6 $3 + 10
+  StrCpy $7 $0 1 $6
+  StrCmp $7 "=" 0 update_pid_invalid
+  IntOp $6 $6 + 1
+  StrLen $7 $UpdatePid
+  StrCpy $8 $0 $7 $6
+  StrCmp $8 $UpdatePid 0 update_pid_invalid
+  IntOp $6 $6 + $7
+  StrCpy $8 $0 1 $6
+  StrCmp $8 "" update_pid_next
+  StrCmp $8 " " update_pid_next
+  StrCmp $8 "$\t" update_pid_next
+  Goto update_pid_invalid
+update_pid_next:
+  IntOp $3 $3 + 1
+  Goto update_pid_scan
+update_pid_open:
+  ; SYNCHRONIZE grants only the right to observe process exit; no termination.
+  System::Call 'kernel32::OpenProcess(i 0x00100000, i 0, i $UpdatePid) p.r0 ?e'
+  Pop $1
+  StrCpy $UpdateProcessHandle $0
+  StrCmp $0 0 0 update_parent_done
+  ; A validated nonzero PID can already have exited before setup starts.
+  IntCmp $1 87 update_parent_done
+  StrCpy $FailureMessage "Setup could not confirm that ${PRODUCT_NAME} has closed. Close ${PRODUCT_NAME}, then run Setup again."
+  Call Fail
+update_pid_invalid:
+  StrCpy $FailureMessage "Setup received an invalid update process ID. Run Setup again from ${PRODUCT_NAME} or without update arguments."
+  Call Fail
+update_parent_done:
+  ClearErrors
+FunctionEnd
+
+Function WaitForUpdateParent
+  StrCmp $UpdateProcessHandle 0 update_wait_done
+  DetailPrint "Waiting for ${PRODUCT_NAME} to close..."
+  System::Call 'kernel32::WaitForSingleObject(p $UpdateProcessHandle, i ${UPDATE_WAIT_TIMEOUT_MS}) i.r0'
+  Call CloseUpdateParentHandle
+  IntCmp $0 0 update_wait_done
+  IntCmp $0 258 update_wait_timeout
+  StrCpy $FailureMessage "Setup could not confirm that ${PRODUCT_NAME} has closed. Close ${PRODUCT_NAME}, then run Setup again."
+  Call Fail
+update_wait_timeout:
+  StrCpy $FailureMessage "${PRODUCT_NAME} is still closing. Close ${PRODUCT_NAME} and any tag editor windows, then run Setup again."
+  Call Fail
+update_wait_done:
+FunctionEnd
+
+Function .onGUIEnd
+  Call CloseUpdateParentHandle
+FunctionEnd
+
+Function .onInstSuccess
+  Call CloseUpdateParentHandle
+FunctionEnd
+
+Function .onInstFailed
+  Call CloseUpdateParentHandle
+FunctionEnd
+
 Function .onInit
+  StrCpy $UpdateProcessHandle 0
+  Call CaptureUpdateParent
   SetShellVarContext current
   SetRegView 64
   ${IfNot} ${RunningX64}
@@ -292,6 +403,9 @@ unsafe_location:
 FunctionEnd
 
 Section "Install or update"
+  ; Wait only once installation starts. Existing lock/ownership checks below
+  ; still reject another running instance before changing any installed files.
+  Call WaitForUpdateParent
   StrCpy $IsLegacy 0
   IfFileExists "$INSTDIR\.museek-install.ini" native_install
   IfFileExists "$INSTDIR\*.*" existing_folder fresh_install

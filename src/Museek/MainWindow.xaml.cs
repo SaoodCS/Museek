@@ -105,6 +105,8 @@ public partial class MainWindow : Window
         e.Cancel = true;
         if (_closing) return;
         _closing = true;
+        var updateCompletion = _updateWindow?.Completion ?? Task.CompletedTask;
+        _updateWindow?.Close();
         ResetTrackTransition();
         IsEnabled = false;
         _timer.Stop();
@@ -116,7 +118,7 @@ public partial class MainWindow : Window
         {
             await Task.WhenAll(_activeProbe ?? Task.CompletedTask, _activeExport ?? Task.CompletedTask,
                 _activeArtwork ?? Task.CompletedTask, _activeFolder ?? Task.CompletedTask,
-                _activePlayerInitialization ?? Task.CompletedTask);
+                _activePlayerInitialization ?? Task.CompletedTask, updateCompletion);
         }
         catch (Exception) { /* The load/save handler reports errors while the window is open. */ }
         _player.PlaybackError -= Player_PlaybackError;

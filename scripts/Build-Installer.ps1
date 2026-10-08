@@ -6,11 +6,15 @@ param(
     [string]$Version,
     [string]$ProductId = 'Museek',
     [string]$ProductName = 'Museek',
-    [string]$DefaultInstallDirectory = '$LOCALAPPDATA\Programs\Museek'
+    [string]$DefaultInstallDirectory = '$LOCALAPPDATA\Programs\Museek',
+    [int]$UpdateWaitTimeoutMilliseconds = 30000
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+if ($UpdateWaitTimeoutMilliseconds -lt 1 -or $UpdateWaitTimeoutMilliseconds -gt 30000) {
+    throw 'The update-parent wait timeout must be between 1 and 30000 milliseconds.'
+}
 $projectRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 if (-not $PayloadDirectory) { $PayloadDirectory = Join-Path $projectRoot 'dist\Museek' }
 if (-not $OutputPath) { $OutputPath = Join-Path $projectRoot 'dist\setup.exe' }
@@ -131,6 +135,7 @@ $ErrorActionPreference='Stop';try{$m=Get-Content -LiteralPath "$env:MUSEEK_SETUP
 '@
 $defines = [ordered]@{
     PRODUCT_ID = $ProductId; PRODUCT_NAME = $ProductName; APP_VERSION = $Version; APP_VERSION_QUAD = $quadVersion
+    UPDATE_WAIT_TIMEOUT_MS = $UpdateWaitTimeoutMilliseconds
     SETUP_OUTPUT = ConvertTo-NsisLiteral $output; DEFAULT_INSTALL_DIR = $DefaultInstallDirectory
     PAYLOAD_INCLUDE = ConvertTo-NsisLiteral $payloadInclude; MANIFEST_INCLUDE = ConvertTo-NsisLiteral $manifestInclude
     APP_ICON = ConvertTo-NsisLiteral (Join-Path $projectRoot 'src\Museek\Assets\Museek.ico'); PAYLOAD_KB = $payloadKb

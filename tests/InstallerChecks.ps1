@@ -81,19 +81,110 @@ function Read-UninstallRegistration([string]$ProductId) {
 }
 
 function Compile-Setup([string]$Payload, [string]$Version, [string]$Output,
-                       [string]$ProductId, [string]$ProductName, [string]$InstallDirectory) {
+                       [string]$ProductId, [string]$ProductName, [string]$InstallDirectory,
+                       [int]$UpdateWaitTimeoutMilliseconds = 30000) {
     foreach ($path in @($Payload, $Output, $InstallDirectory)) {
         [void](Assert-WorkspacePath $path)
     }
     & (Join-Path $projectRoot 'scripts\Build-Installer.ps1') -PayloadDirectory $Payload `
         -OutputPath $Output -MakensisPath $NsisPath -ProductId $ProductId -ProductName $ProductName `
-        -DefaultInstallDirectory $InstallDirectory -Version $Version
+        -DefaultInstallDirectory $InstallDirectory -Version $Version `
+        -UpdateWaitTimeoutMilliseconds $UpdateWaitTimeoutMilliseconds
     Assert-Check (Test-Path -LiteralPath $Output -PathType Leaf) 'a runnable setup executable was built'
 }
 
 function Read-FixtureLog {
     if (-not (Test-Path -LiteralPath $script:logPath -PathType Leaf)) { return @() }
     return @(Get-Content -LiteralPath $script:logPath | ForEach-Object { $_ | ConvertFrom-Json })
+}
+
+function Test-UpdateParentWait {
+    $setupInitial = Join-Path $runDirectory 'setup-update-parent-initial.exe'
+    $setupUpdate = Join-Path $runDirectory 'setup-update-parent.exe'
+    $setupTimeout = Join-Path $runDirectory 'setup-update-parent-timeout.exe'
+    Compile-Setup $payload1 '1.0.0' $setupInitial $updateProductId $updateProductName $updateDirectory
+    Compile-Setup $payload2 '1.1.0' $setupUpdate $updateProductId $updateProductName $updateDirectory
+    Compile-Setup $payload2 '1.1.0' $setupTimeout $updateProductId $updateProductName $updateDirectory 500
+    Assert-Check ((Invoke-Native $setupInitial '/S') -eq 0) 'the update-parent fixture installs its first version'
+    $ready = Join-Path $runDirectory 'update-parent-ready'
+    $stop = Join-Path $runDirectory 'update-parent-stop'
+    $parent = Start-Process -FilePath (Join-Path $updateDirectory 'Museek.exe') `
+        -ArgumentList @('--hold', ('"' + $ready + '"'), ('"' + $stop + '"')) -PassThru -WindowStyle Hidden
+    $setup = $null
+    try {
+        Assert-Check (Wait-Until { Test-Path -LiteralPath $ready -PathType Leaf }) 'the update-parent process is alive'
+        $initialMarkerHash = (Get-FileHash -LiteralPath (Join-Path $updateDirectory '.museek-install.ini')).Hash
+        $initialManifestHash = (Get-FileHash -LiteralPath (Join-Path $updateDirectory '.museek-files.ini')).Hash
+        $elapsed = [Diagnostics.Stopwatch]::StartNew()
+        Assert-Check ((Invoke-Native $setupTimeout "/S /UPDATEPID=$($parent.Id)") -ne 0) 'a live update parent is refused after the bounded wait expires'
+        Assert-Check ($elapsed.Elapsed.TotalSeconds -lt 5 -and $script:lastNativeError -match 'still closing') 'the fixture timeout is bounded and reports the pending shutdown'
+        Assert-Check ([IO.File]::ReadAllText((Join-Path $updateDirectory 'payload-version.txt')) -eq 'v1' -and
+            (Read-UninstallRegistration $updateProductId)['DisplayVersion'] -eq '1.0.0') 'a parent timeout preserves the old payload and registration'
+        $setup = Start-Process -FilePath $setupUpdate -ArgumentList "/S /UPDATEPID=$($parent.Id)" -PassThru -WindowStyle Hidden
+        Assert-Check (-not $setup.WaitForExit(1000)) 'setup waits for the requested parent process before updating'
+        Assert-Check ([IO.File]::ReadAllText((Join-Path $updateDirectory 'payload-version.txt')) -eq 'v1') 'waiting for the parent preserves the original payload'
+        Assert-Check ((Read-UninstallRegistration $updateProductId)['DisplayVersion'] -eq '1.0.0') 'waiting for the parent preserves its registered version'
+        Assert-Check ((Get-FileHash -LiteralPath (Join-Path $updateDirectory '.museek-install.ini')).Hash -eq $initialMarkerHash -and
+            (Get-FileHash -LiteralPath (Join-Path $updateDirectory '.museek-files.ini')).Hash -eq $initialManifestHash) 'a timeout and pending parent leave ownership records unchanged'
+        $exitedParentId = $parent.Id
+        [IO.File]::WriteAllText($stop, 'stop')
+        Assert-Check ($parent.WaitForExit(10000) -and $parent.ExitCode -eq 0) 'the update parent exits normally'
+        Assert-Check ($setup.WaitForExit(10000) -and $setup.ExitCode -eq 0) 'setup completes after the update parent exits'
+        Assert-Check ([IO.File]::ReadAllText((Join-Path $updateDirectory 'payload-version.txt')) -eq 'v2') 'parent-aware setup installs the new payload'
+    } finally {
+        [IO.File]::WriteAllText($stop, 'stop')
+        [void]$parent.WaitForExit(10000)
+        $parent.Dispose()
+        if ($setup) { [void]$setup.WaitForExit(10000); $setup.Dispose() }
+    }
+
+    Assert-Check ((Invoke-Native $setupUpdate "/S /UPDATEPID=$exitedParentId") -eq 0) 'a parent that exited before setup starts does not prevent the update'
+    Assert-Check ($null -eq (Get-Process -Id 2147483647 -ErrorAction SilentlyContinue)) 'the absent-parent fixture PID does not identify a live process'
+    Assert-Check ((Invoke-Native $setupUpdate '/S /UPDATEPID=2147483647') -eq 0) 'a valid already-absent parent PID does not prevent the update'
+    $markerHash = (Get-FileHash -LiteralPath (Join-Path $updateDirectory '.museek-install.ini')).Hash
+    $manifestHash = (Get-FileHash -LiteralPath (Join-Path $updateDirectory '.museek-files.ini')).Hash
+    foreach ($argument in @('/UPDATEPID', '/UPDATEPID=', '/UPDATEPID=0', '/UPDATEPID=-1', '/UPDATEPID=abc',
+        '/UPDATEPID=1abc', '/UPDATEPID=+123', '/UPDATEPID=0123', '/UPDATEPID=0x7b', '/UPDATEPID=2147483648',
+        '/UPDATEPID=999999999999999999999999', '/UPDATEPID=1 /UPDATEPID=2', '/UPDATEPID=2147483647/garbage',
+        '/UPDATEPID =2147483647', '/UPDATEPID= 2147483647')) {
+        Assert-Check ((Invoke-Native $setupInitial ('/S ' + $argument)) -ne 0) "an invalid update-parent argument is refused: $argument"
+        Assert-Check ($script:lastNativeError -match 'invalid update process ID') 'invalid parent arguments report their format problem'
+        Assert-Check ([IO.File]::ReadAllText((Join-Path $updateDirectory 'payload-version.txt')) -eq 'v2' -and
+            (Read-UninstallRegistration $updateProductId)['DisplayVersion'] -eq '1.1.0') 'invalid parent arguments cannot downgrade the payload or registration'
+        Assert-Check ((Get-FileHash -LiteralPath (Join-Path $updateDirectory '.museek-install.ini')).Hash -eq $markerHash -and
+            (Get-FileHash -LiteralPath (Join-Path $updateDirectory '.museek-files.ini')).Hash -eq $manifestHash) 'invalid parent arguments leave both ownership records unchanged'
+    }
+
+    $otherReady = Join-Path $runDirectory 'update-other-ready'
+    $otherStop = Join-Path $runDirectory 'update-other-stop'
+    $requestedReady = Join-Path $runDirectory 'update-requested-ready'
+    $requestedStop = Join-Path $runDirectory 'update-requested-stop'
+    $other = Start-Process -FilePath (Join-Path $updateDirectory 'Museek.exe') `
+        -ArgumentList @('--hold', ('"' + $otherReady + '"'), ('"' + $otherStop + '"')) -PassThru -WindowStyle Hidden
+    $requested = $null
+    $blockedSetup = $null
+    try {
+        Assert-Check (Wait-Until { Test-Path -LiteralPath $otherReady -PathType Leaf }) 'another installed app instance is running'
+        $requested = Start-Process -FilePath (Join-Path $updateDirectory 'Museek.exe') `
+            -ArgumentList @('--hold', ('"' + $requestedReady + '"'), ('"' + $requestedStop + '"')) -PassThru -WindowStyle Hidden
+        Assert-Check (Wait-Until { Test-Path -LiteralPath $requestedReady -PathType Leaf }) 'the requested update parent is also running'
+        $blockedSetup = Start-Process -FilePath $setupInitial -ArgumentList "/S /UPDATEPID=$($requested.Id)" -PassThru -WindowStyle Hidden
+        Assert-Check (-not $blockedSetup.WaitForExit(500)) 'setup first waits for its requested parent even when another instance exists'
+        [IO.File]::WriteAllText($requestedStop, 'stop')
+        Assert-Check ($requested.WaitForExit(10000) -and $requested.ExitCode -eq 0) 'the requested parent exits while another instance stays alive'
+        Assert-Check ($blockedSetup.WaitForExit(10000) -and $blockedSetup.ExitCode -ne 0) 'another app instance is still refused after the requested parent exits'
+        Assert-Check (-not $other.HasExited -and [IO.File]::ReadAllText((Join-Path $updateDirectory 'payload-version.txt')) -eq 'v2') 'the remaining instance is not terminated and its payload remains unchanged'
+        Assert-Check ((Read-UninstallRegistration $updateProductId)['DisplayVersion'] -eq '1.1.0' -and
+            (Get-FileHash -LiteralPath (Join-Path $updateDirectory '.museek-install.ini')).Hash -eq $markerHash -and
+            (Get-FileHash -LiteralPath (Join-Path $updateDirectory '.museek-files.ini')).Hash -eq $manifestHash) 'a remaining instance preserves registration and ownership records'
+    } finally {
+        [IO.File]::WriteAllText($requestedStop, 'stop')
+        [IO.File]::WriteAllText($otherStop, 'stop')
+        if ($requested) { [void]$requested.WaitForExit(10000); $requested.Dispose() }
+        [void]$other.WaitForExit(10000)
+        $other.Dispose()
+        if ($blockedSetup) { [void]$blockedSetup.WaitForExit(10000); $blockedSetup.Dispose() }
+    }
 }
 
 function Wait-Until([scriptblock]$Condition, [int]$TimeoutSeconds = 10) {
@@ -216,6 +307,7 @@ $alternateDirectory = Assert-WorkspacePath (Join-Path $runDirectory 'Unexpected 
 $foreignDirectory = Assert-WorkspacePath (Join-Path $runDirectory 'Foreign Folder')
 $legacyDirectory = Assert-WorkspacePath (Join-Path $runDirectory 'Legacy Installed App')
 $repairDirectory = Assert-WorkspacePath (Join-Path $runDirectory 'Repair Installed App')
+$updateDirectory = Assert-WorkspacePath (Join-Path $runDirectory 'Update Parent Installed App')
 $payload1 = Assert-WorkspacePath (Join-Path $runDirectory 'payload-v1')
 $payload2 = Assert-WorkspacePath (Join-Path $runDirectory 'payload-v2')
 $setup1 = Join-Path $runDirectory 'setup-v1.exe'
@@ -228,7 +320,9 @@ $legacyProductId = "$productId.Legacy"
 $legacyProductName = "$productName Legacy"
 $repairProductId = "$productId.Repair"
 $repairProductName = "$productName Repair"
-$script:productIds = @($productId, $foreignProductId, $legacyProductId, $repairProductId)
+$updateProductId = "$productId.UpdateParent"
+$updateProductName = "$productName UpdateParent"
+$script:productIds = @($productId, $foreignProductId, $legacyProductId, $repairProductId, $updateProductId)
 $script:uninstallPrefix = 'Software\Microsoft\Windows\CurrentVersion\Uninstall'
 $script:currentUser64 = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
     [Microsoft.Win32.RegistryHive]::CurrentUser, [Microsoft.Win32.RegistryView]::Registry64)
@@ -238,6 +332,7 @@ $shortcutPath = Join-Path $startMenuDirectory ($productName + '.lnk')
 $foreignShortcutPath = Join-Path $startMenuDirectory ($foreignProductName + '.lnk')
 $legacyShortcutPath = Join-Path $startMenuDirectory ($legacyProductName + '.lnk')
 $repairShortcutPath = Join-Path $startMenuDirectory ($repairProductName + '.lnk')
+$updateShortcutPath = Join-Path $startMenuDirectory ($updateProductName + '.lnk')
 $actualSettingsPath = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Museek\settings.json'
 $actualSettingsHash = if (Test-Path -LiteralPath $actualSettingsPath -PathType Leaf) {
     (Get-FileHash -LiteralPath $actualSettingsPath -Algorithm SHA256).Hash
@@ -484,6 +579,7 @@ try {
         -not (Test-Path -LiteralPath $repairDirectory) } 20) 'uninstall removes the repaired installation completely'
     Assert-Check (-not (Test-Path -LiteralPath $repairShortcutPath)) 'uninstall tolerates an already-absent Start menu shortcut'
 
+    Test-UpdateParentWait
     $currentActualSettingsHash = if (Test-Path -LiteralPath $actualSettingsPath -PathType Leaf) {
         (Get-FileHash -LiteralPath $actualSettingsPath -Algorithm SHA256).Hash
     } else { $null }
@@ -501,7 +597,7 @@ try {
     }
     # Cleanup is scoped to random product IDs and workspace paths. Evidence is retained.
     foreach ($item in @(@($productId, $installDirectory), @($foreignProductId, $foreignDirectory),
-        @($legacyProductId, $legacyDirectory), @($repairProductId, $repairDirectory))) {
+        @($legacyProductId, $legacyDirectory), @($repairProductId, $repairDirectory), @($updateProductId, $updateDirectory))) {
         $id = [string]$item[0]
         $directory = Assert-WorkspacePath ([string]$item[1])
         $uninstaller = Join-Path $directory 'uninstall.exe'
@@ -516,7 +612,7 @@ try {
             $script:currentUser64.DeleteSubKeyTree($script:uninstallPrefix + '\' + $id, $false)
         }
     }
-    foreach ($path in @($shortcutPath, $foreignShortcutPath, $legacyShortcutPath, $repairShortcutPath)) {
+    foreach ($path in @($shortcutPath, $foreignShortcutPath, $legacyShortcutPath, $repairShortcutPath, $updateShortcutPath)) {
         if (([IO.Path]::GetFileName($path)).Contains($token) -and (Test-Path -LiteralPath $path -PathType Leaf)) {
             $shortcutTarget = [MuseekInstallerShellLink]::GetTarget($path)
             if ($shortcutTarget.StartsWith($runDirectory + '\', [StringComparison]::OrdinalIgnoreCase)) {

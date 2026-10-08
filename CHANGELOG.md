@@ -2,6 +2,14 @@
 
 Version notes are maintained alongside the code. See [GitHub Releases](https://github.com/SaoodCS/Museek/releases) for published versions and installers.
 
+## 1.4.0
+
+- Added **Help → Check for updates** with the installed version, newer-release detection, download progress, and an explicit installation action.
+- Verified update downloads against release checksums and installer versions before opening Setup.
+- Made Setup wait for the updating Museek process to exit before replacing files.
+
+See [the full version notes](releases/1.4.0.md).
+
 ## 1.3.2
 
 - Packaged a validated VLC plugin cache to reduce first-playback decoder discovery.
